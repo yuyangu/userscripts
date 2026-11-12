@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.8.1
+// @version      3.9.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -790,7 +790,8 @@
         if (virtualTimer) return;
         virtualTimer = setInterval(() => {
             if (!saveModeActive || !virtualPlaying) return;
-            const rate = Number(video.playbackRate) || 1;
+            // 智慧树按"真实观看时长"记进度，倍速无效 → 虚拟播放强制 1x，保证时长与视频等长
+            const rate = IS_ZHS ? 1 : (Number(video.playbackRate) || 1);
             virtualTime = Math.min(virtualTime + 0.25 * rate, realDuration);
             try { video.dispatchEvent(new Event('timeupdate')); } catch (e) {}
             if (virtualTime >= realDuration - 0.05) {
@@ -1446,7 +1447,9 @@
         bodyBox.appendChild(makeRow('静音', makeSwitch('MUTE'),
             '强制静音播放，不影响进度记录'));
         bodyBox.appendChild(makeRow('播放倍速', makeSpeedInput(),
-            '0 = 不干预；支持 0~16 倍速。注意：超过 4 倍速时浏览器会自动静音'));
+            IS_ZHS
+                ? '智慧树按真实观看时长计进度，倍速不会加快进度；建议保持 1x'
+                : '0 = 不干预；支持 0~16 倍速。注意：超过 4 倍速时浏览器会自动静音'));
         // 智慧树：并行窗口数（多开同时播放，进度按真实观看时长累计）
         if (IS_ZHS) {
             const wrap = document.createElement('span');
@@ -1483,7 +1486,9 @@
             if (on) enableSaveData(v);
             else disableSaveData(v);
         }),
-            '不下载视频画面，用虚拟进度推进；弹题与进度上报照常，几乎不耗流量'));
+            IS_ZHS
+                ? '不下载视频画面，按 1x 虚拟播放（智慧树按真实时长计进度，倍速无效）；流量几乎为零'
+                : '不下载视频画面，用虚拟进度推进；弹题与进度上报照常，几乎不耗流量'));
         bodyBox.appendChild(makeRow('答题延迟', makeDelayInputs('DELAY_ANSWER_MIN', 'DELAY_ANSWER_MAX'),
             '弹题后等待的随机秒数（模仿真人审题）；0~0 表示立即作答'));
         bodyBox.appendChild(makeRow('下一节延迟', makeDelayInputs('DELAY_NEXT_MIN', 'DELAY_NEXT_MAX'),
@@ -1530,7 +1535,7 @@
 
         // 智慧树模式：隐藏不适用的功能行
         if (IS_ZHS) {
-            ['自动答题', '字幕匹配答案', '弹题保护', '自动提问', '省流量模式', '答题延迟'].forEach(name => {
+            ['自动答题', '字幕匹配答案', '弹题保护', '自动提问', '答题延迟'].forEach(name => {
                 const row = Array.from(bodyBox.querySelectorAll('.gx-row')).find(r => {
                     const l = r.querySelector('.gx-label');
                     return l && l.textContent === name;
@@ -1580,8 +1585,8 @@
     // ===================== 主循环 =====================
     function tick() {
         bindVideo();
-        // 省流量模式：确保虚拟播放器已启用（智慧树不启用，避免破坏其播放器状态机）
-        if (state.SAVE_DATA && !IS_ZHS) {
+        // 省流量模式：确保虚拟播放器已启用（智慧树同样支持：不下载画面，学习时长按真实时间照常累计）
+        if (state.SAVE_DATA) {
             const v0 = getVideo();
             if (v0 && !saveModeActive) enableSaveData(v0);
         }
