@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.14.1
+// @version      3.15.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -796,7 +796,8 @@
         } catch (e) {}
 
         // 记录原始定义（便于关闭时还原）
-        ['duration', 'currentTime', 'paused', 'ended'].forEach(k => {
+        ['duration', 'currentTime', 'paused', 'ended', 'readyState', 'networkState',
+         'buffered', 'seekable', 'played', 'videoWidth', 'videoHeight'].forEach(k => {
             origMembers[k] = Object.getOwnPropertyDescriptor(video, k) || null;
         });
         origMembers.play = video.play;
@@ -813,6 +814,23 @@
             });
             Object.defineProperty(video, 'paused', { configurable: true, get: () => !virtualPlaying });
             Object.defineProperty(video, 'ended', { configurable: true, get: () => virtualTime >= realDuration - 0.05 });
+            // 伪装"正常播放中"的媒体状态：页面的进度上报会检查这些
+            Object.defineProperty(video, 'readyState', { configurable: true, get: () => 4 });      // HAVE_ENOUGH_DATA
+            Object.defineProperty(video, 'networkState', { configurable: true, get: () => 1 });    // NETWORK_IDLE
+            Object.defineProperty(video, 'videoWidth', { configurable: true, get: () => 1280 });
+            Object.defineProperty(video, 'videoHeight', { configurable: true, get: () => 720 });
+            Object.defineProperty(video, 'buffered', {
+                configurable: true,
+                get: () => ({ length: 1, start: () => 0, end: () => realDuration }),
+            });
+            Object.defineProperty(video, 'seekable', {
+                configurable: true,
+                get: () => ({ length: 1, start: () => 0, end: () => realDuration }),
+            });
+            Object.defineProperty(video, 'played', {
+                configurable: true,
+                get: () => ({ length: 1, start: () => 0, end: () => virtualTime }),
+            });
         } catch (e) { log('虚拟播放属性劫持失败', e); return; }
 
         video.play = function () { virtualPlaying = true; startVirtualTick(video); return Promise.resolve(); };
@@ -852,7 +870,8 @@
         if (virtualTimer) { clearInterval(virtualTimer); virtualTimer = null; }
 
         // 还原属性与方法
-        ['duration', 'currentTime', 'paused', 'ended'].forEach(k => {
+        ['duration', 'currentTime', 'paused', 'ended', 'readyState', 'networkState',
+         'buffered', 'seekable', 'played', 'videoWidth', 'videoHeight'].forEach(k => {
             try { delete video[k]; } catch (e) {}
             if (origMembers[k]) { try { Object.defineProperty(video, k, origMembers[k]); } catch (e) {} }
         });
@@ -873,6 +892,40 @@
             } catch (e) {}
         }
         log('省流量模式已关闭，恢复真实视频');
+    }
+
+    // 省流量模式自检：每 3 分钟核对服务端学习时长，若没增长说明页面不上报 → 自动回退真实播放
+    let saveSelfCheckAt = 0;
+    let saveSelfLastStudy = -1;
+    function selfCheckSaveMode() {
+        if (!IS_ZHS || !saveModeActive) return;
+        if (Date.now() - saveSelfCheckAt < 3 * 60 * 1000) return;
+        saveSelfCheckAt = Date.now();
+        const fid = zhsCurrentFileId();
+        const cid = zhsCourseId();
+        if (!fid || !cid || !jq || !jq.ajax) return;
+        jq.ajax({
+            url: '//studyResources.zhihuishu.com/studyResources/stuResouce/queryResourceMenuTree',
+            data: { courseId: cid },
+            dataType: 'jsonp',
+            timeout: 8000,
+            success: (res) => {
+                const list = (res && (res.rt || res.data)) || [];
+                if (!Array.isArray(list)) return;
+                const stat = computeZhsStat(list);
+                const it = stat.map[fid];
+                if (!it) return;
+                if (saveSelfLastStudy >= 0 && it.s <= saveSelfLastStudy) {
+                    log('省流量模式自检：3 分钟内学习时长未增长 → 自动回退真实播放');
+                    setStatus('省流量模式未上报进度，已自动关闭', 'warn');
+                    state.SAVE_DATA = false;
+                    saveState();
+                    const v = getVideo();
+                    if (v) disableSaveData(v);
+                }
+                saveSelfLastStudy = it.s;
+            },
+        });
     }
 
     // ===================== 智慧树网适配（资料学习页） =====================
@@ -2106,6 +2159,7 @@
             zhsSyncDoneToDom();
             zhsDecorateDurations();
             renderReqCopy();
+            selfCheckSaveMode();
             // 页面渲染出侧栏后再初始化拖拽手柄
             if (!document.getElementById('gxnufl-sidebar-handle')) initSidebarResizer();
         }
