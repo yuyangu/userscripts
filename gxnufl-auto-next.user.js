@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.9.1
+// @version      3.10.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -892,6 +892,86 @@
         });
     }
 
+    // ===================== 智慧树资源统计（总时长 / 已完成 / 剩余） =====================
+    let zhsStat = null;    // { total, done, count, doneCount, map, fetchedAt }
+    let elZhsStat = null;
+
+    function fmtDuration(sec) {
+        sec = Math.max(0, Math.round(sec));
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        if (h > 0) return h + '小时' + (m > 0 ? m + '分' : '');
+        if (m > 0) return m + '分' + (sec % 60 > 0 ? (sec % 60) + '秒' : '');
+        return sec + '秒';
+    }
+
+    // 递归统计资源树：总时长、已完成（studyTime >= totalTime）
+    function computeZhsStat(list) {
+        let total = 0, done = 0, count = 0, doneCount = 0;
+        const map = {};
+        (function walk(nodes) {
+            (nodes || []).forEach(n => {
+                if (n.type === 1 && n.totalTime) {
+                    const t = Number(n.totalTime) || 0;
+                    const s = Number(n.studyTime) || 0;
+                    total += t;
+                    count++;
+                    const isDone = s >= t;
+                    if (isDone) { done += t; doneCount++; }
+                    map[String(n.id)] = { t: t, done: isDone };
+                }
+                if (n.childList) walk(n.childList);
+            });
+        })(list);
+        return { total: total, done: done, count: count, doneCount: doneCount, map: map, fetchedAt: Date.now() };
+    }
+
+    function fetchZhsStats() {
+        if (!IS_ZHS) return;
+        const cid = zhsCourseId();
+        if (!cid) return;
+        const url = '//studyResources.zhihuishu.com/studyResources/stuResouce/queryResourceMenuTree';
+        const handle = (res) => {
+            const list = (res && (res.rt || res)) || [];
+            if (!Array.isArray(list)) return;
+            zhsStat = computeZhsStat(list);
+            renderZhsStat();
+            log('资源统计：', zhsStat.total, '秒 /', zhsStat.count, '个 / 已完成', zhsStat.doneCount);
+        };
+        // 优先复用页面的 server 对象（跨域方式与站点一致）
+        if (window.server && typeof window.server.get === 'function') {
+            try { window.server.get(url, { courseId: cid }, handle); return; } catch (e) {}
+        }
+        // 回退：jQuery JSONP
+        if (jq && jq.getJSON) {
+            try { jq.getJSON(url + '?courseId=' + cid + '&callback=?', handle); return; } catch (e) {}
+        }
+    }
+
+    function renderZhsStat() {
+        if (!elZhsStat) return;
+        if (!zhsStat) {
+            elZhsStat.textContent = '资源统计：加载中…';
+            return;
+        }
+        let total = zhsStat.total, done = zhsStat.done;
+        let count = zhsStat.count, doneCount = zhsStat.doneCount;
+        // 合并"多开窗口已播完"但接口快照尚未更新的部分
+        const localDone = readJsonMap(ZHS_DONE_KEY);
+        Object.keys(localDone).forEach(id => {
+            const it = zhsStat.map[id];
+            if (it && !it.done) {
+                it.done = true;
+                done += it.t;
+                doneCount++;
+            }
+        });
+        const remain = Math.max(0, total - done);
+        elZhsStat.innerHTML =
+            '<div>资源总时长 <b>' + fmtDuration(total) + '</b>（' + count + ' 个视频）</div>' +
+            '<div>已完成 ' + doneCount + ' 个 · 剩余 <b>' + fmtDuration(remain) + '</b></div>';
+    }
+
     function zhsCurrentFileId() {
         const m = location.search.match(/[?&]fileId=(\d+)/);
         return m ? m[1] : '';
@@ -1187,6 +1267,12 @@
 #gxnufl-panel .gx-info:hover + .gx-tip { display: block; }
 #gxnufl-pill { cursor: grab; }
 #gxnufl-pill:active { cursor: grabbing; }
+#gxnufl-panel .gx-stat {
+    margin: 0 0 8px; padding: 5px 8px; border-radius: 6px;
+    background: rgba(79,142,247,0.12); color: #cfd3d6;
+    font-size: 11px; line-height: 1.55;
+}
+#gxnufl-panel .gx-stat b { color: #9cc0ff; font-weight: 600; }
 #gxnufl-panel .gx-foot { margin-top: 7px; font-size: 10.5px; color: #8a8f98; text-align: center; }
         `;
         const style = document.createElement('style');
@@ -1494,6 +1580,13 @@
         elStatus.className = 'gx-status';
         elStatus.textContent = '初始化中…';
 
+        // 智慧树：资源总时长统计块
+        if (IS_ZHS) {
+            elZhsStat = document.createElement('div');
+            elZhsStat.className = 'gx-stat';
+            elZhsStat.textContent = '资源统计：加载中…';
+        }
+
         const bodyBox = document.createElement('div');
         bodyBox.appendChild(makeRow('自动下一节', makeSwitch('AUTO_NEXT'),
             '视频播完后自动点击"下一节"，进入下一节继续播放'));
@@ -1613,6 +1706,7 @@
 
         elPanel.appendChild(head);
         elPanel.appendChild(elStatus);
+        if (elZhsStat) elPanel.appendChild(elZhsStat);
         elPanel.appendChild(bodyBox);
         elPanel.appendChild(btnRow);
         elPanel.appendChild(foot);
@@ -1694,12 +1788,14 @@
     }
 
     function start() {
-        log('脚本已启动 v3.6', state);
+        log('脚本已启动 v3.10', state);
         buildUI();
         // 移除"浏览器版本过低"提示条（页面可能延迟插入，做几次补偿检查）
         removeBrowserTip();
         setTimeout(removeBrowserTip, 1200);
         setInterval(removeBrowserTip, 5000);
+        // 智慧树：加载资源统计（等页面初始化完成）
+        if (IS_ZHS) setTimeout(fetchZhsStats, 2000);
         setInterval(tick, FIXED.POLL_MS);
         // 倍速管理用更高频检查（100ms），保证高倍速下能及时在题目点减速
         setInterval(() => {
