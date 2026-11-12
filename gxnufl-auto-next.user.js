@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.13.0
+// @version      3.13.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -1237,8 +1237,8 @@
         return /[?&]gxParallel=1/.test(location.search);
     }
 
-    // 「多开窗口」每次打开的窗口数
-    const MULTI_COUNT = 3;
+    // 「多开窗口」每次打开的数量（1 个；需要更多就重复点击）
+    const MULTI_COUNT = 1;
 
     // 打开多开窗口：每个播一个未完成资源（优先未看完的），播完自动关闭
     function openParallelWindows() {
@@ -1908,7 +1908,7 @@
             parBtn = document.createElement('button');
             parBtn.className = 'gx-ask';
             parBtn.textContent = '多开窗口';
-            parBtn.title = '每次打开 ' + MULTI_COUNT + ' 个窗口，各播一个未完成资源（优先未看完的，播完自动关闭）';
+            parBtn.title = '每次打开 ' + MULTI_COUNT + ' 个窗口（或标签页），自动播放未完成资源（优先未看完的）；播完自动切下一个，可重复点击开更多';
             parBtn.addEventListener('click', () => openParallelWindows());
         }
 
