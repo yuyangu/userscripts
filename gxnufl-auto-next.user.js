@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.15.1
+// @version      3.16.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -59,8 +59,9 @@
         SPEED: 0,               // 播放倍速：0=不干预；支持自定义输入（最高 16）
         GUARD: true,            // 弹题保护：高倍速时接近题目点自动临时降至 1x，确保题目弹出
         AUTO_ASK: false,        // 自动提问：每节视频自动生成一个问题并提交一次
-        SAVE_DATA: false,       // 省流量模式：不下载视频内容，虚拟推进进度（弹题/进度上报照常）
-        MULTI_WIN: true,        // 智慧树：多开时用独立窗口（false = 浏览器标签页）
+        SAVE_DATA: false,       // 省流量模式（默认关：不下载视频、虚拟推进；需要时手动开）
+        MULTI_WIN: false,       // 智慧树：多开用独立窗口（默认关 → 后台标签页）
+        KEEP_ALIVE: false,      // 后台保活（超声波防标签页休眠，默认关）
         DELAY_ANSWER_MIN: 2,    // 答题延迟下限（秒）
         DELAY_ANSWER_MAX: 8,    // 答题延迟上限（秒）—— 0~0 表示关闭
         DELAY_NEXT_MIN: 1,      // 下一节延迟下限（秒）
@@ -1144,51 +1145,6 @@
     // ===================== 智慧树资源统计（总时长 / 已完成 / 剩余） =====================
     let zhsStat = null;    // { total, done, count, doneCount, map, fetchedAt }
     let elZhsStat = null;
-    let elReqCopy = null;  // "上报参数"状态行（点击复制，免开 F12）
-
-    // 复制捕获到的上报请求参数（避免用户开 F12 触发平台反调试）
-    function copyStudyReq() {
-        const req = window.__gxStudyReq;
-        if (!req) {
-            setStatus('还没捕获到上报请求，请正常播放任意视频 30 秒', 'warn');
-            return;
-        }
-        const text = 'URL: ' + req.url + '\nMethod: ' + req.method + '\nBody: ' + (req.body || '') + '\nAt: ' + new Date(req.at).toLocaleString();
-        const done = () => setStatus('已复制上报参数，可直接粘贴发给小布', 'ok');
-        try {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
-                return;
-            }
-        } catch (e) {}
-        fallbackCopy(text, done);
-    }
-
-    function fallbackCopy(text, done) {
-        try {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position = 'fixed';
-            ta.style.left = '-9999px';
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            document.body.removeChild(ta);
-            done();
-        } catch (e) {
-            setStatus('复制失败，请手动查看 Console（不建议开 F12）', 'warn');
-        }
-    }
-
-    function renderReqCopy() {
-        if (!elReqCopy) return;
-        const has = !!window.__gxStudyReq;
-        const txt = has
-            ? '上报参数：✅ 已捕获（点击复制）'
-            : '上报参数：未捕获（正常播放 30 秒后自动捕获）';
-        if (elReqCopy.textContent !== txt) elReqCopy.textContent = txt;
-        elReqCopy.style.opacity = has ? '1' : '0.75';
-    }
 
     function fmtDuration(sec) {
         sec = Math.max(0, Math.round(sec));
@@ -2035,18 +1991,11 @@
         elStatus.className = 'gx-status';
         elStatus.textContent = '初始化中…';
 
-        // 智慧树：资源统计块 + 上报参数状态行
+        // 智慧树：资源统计块
         if (IS_ZHS) {
             elZhsStat = document.createElement('div');
             elZhsStat.className = 'gx-stat';
             elZhsStat.textContent = '资源统计：加载中…';
-
-            elReqCopy = document.createElement('div');
-            elReqCopy.className = 'gx-stat';
-            elReqCopy.style.cursor = 'pointer';
-            elReqCopy.title = '智慧树有开发者工具检测（开 F12 会暂停播放并白屏）。点这里复制脚本捕获到的进度上报参数，无需开 F12';
-            elReqCopy.textContent = '上报参数：未捕获（正常播放 30 秒后自动捕获）';
-            elReqCopy.addEventListener('click', copyStudyReq);
         }
 
         const bodyBox = document.createElement('div');
@@ -2082,6 +2031,10 @@
             IS_ZHS
                 ? '不下载视频画面，按 1x 虚拟播放（智慧树按真实时长计进度，倍速无效）；流量几乎为零'
                 : '不下载视频画面，用虚拟进度推进；弹题与进度上报照常，几乎不耗流量'));
+        bodyBox.appendChild(makeRow('后台保活', makeSwitch('KEEP_ALIVE', (on) => {
+            if (on) startKeepAlive();
+        }),
+            '用超声波让页面保持"有声"活跃状态，防止浏览器休眠后台标签页导致刷课中断（默认关）'));
         bodyBox.appendChild(makeRow('答题延迟', makeDelayInputs('DELAY_ANSWER_MIN', 'DELAY_ANSWER_MAX'),
             '弹题后等待的随机秒数（模仿真人审题）；0~0 表示立即作答'));
         bodyBox.appendChild(makeRow('下一节延迟', makeDelayInputs('DELAY_NEXT_MIN', 'DELAY_NEXT_MAX'),
@@ -2148,7 +2101,6 @@
         elPanel.appendChild(head);
         elPanel.appendChild(elStatus);
         if (elZhsStat) elPanel.appendChild(elZhsStat);
-        if (elReqCopy) elPanel.appendChild(elReqCopy);
         elPanel.appendChild(bodyBox);
         elPanel.appendChild(btnRow);
         elPanel.appendChild(foot);
@@ -2185,7 +2137,6 @@
             lastZhsSyncAt = Date.now();
             zhsSyncDoneToDom();
             zhsDecorateDurations();
-            renderReqCopy();
             selfCheckSaveMode();
             // 页面渲染出侧栏后再初始化拖拽手柄
             if (!document.getElementById('gxnufl-sidebar-handle')) initSidebarResizer();
@@ -2244,11 +2195,13 @@
             log('多开窗口：已自动开启省流量模式');
         }
         buildUI();
-        // 后台保活：先试一次；若被浏览器自动播放策略拦下，等用户第一次点击/按键时再启动
-        startKeepAlive();
-        const keepKick = () => { startKeepAlive(); };
-        document.addEventListener('click', keepKick, { once: true });
-        document.addEventListener('keydown', keepKick, { once: true });
+        // 后台保活（默认关闭）：开启时先试一次，被自动播放策略拦下则等用户点击后再启动
+        if (state.KEEP_ALIVE) {
+            startKeepAlive();
+            const keepKick = () => { startKeepAlive(); };
+            document.addEventListener('click', keepKick, { once: true });
+            document.addEventListener('keydown', keepKick, { once: true });
+        }
         // 移除"浏览器版本过低"提示条（页面可能延迟插入，做几次补偿检查）
         removeBrowserTip();
         setTimeout(removeBrowserTip, 1200);
