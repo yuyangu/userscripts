@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.8.0
+// @version      3.8.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -1058,7 +1058,7 @@
     box-shadow: 0 8px 28px rgba(0,0,0,0.5);
     padding: 10px 12px 11px;
 }
-#gxnufl-panel .gx-head { display: flex; justify-content: space-between; align-items: center; }
+#gxnufl-panel .gx-head { display: flex; justify-content: space-between; align-items: center; cursor: move; user-select: none; }
 #gxnufl-panel .gx-title { font-weight: 600; font-size: 12.5px; color: #f1f3f4; }
 #gxnufl-panel .gx-min { cursor: pointer; color: #9aa0a6; padding: 0 5px; font-weight: 700; line-height: 1; }
 #gxnufl-panel .gx-min:hover { color: #ffffff; }
@@ -1269,16 +1269,24 @@
         return wrap;
     }
 
-    // ---- 胶囊拖拽（位置记忆）+ 面板位置同步 ----
+    // ---- 拖拽（位置记忆）：胶囊 + 设置面板 ----
     const PILL_POS_KEY = 'gxnufl_pill_pos';
+    const PANEL_POS_KEY = 'gxnufl_panel_pos';
 
-    function getSavedPos() {
-        try { return JSON.parse(localStorage.getItem(PILL_POS_KEY) || 'null'); } catch (e) { return null; }
+    function readPos(key) {
+        try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { return null; }
     }
+
+    function writePos(key, left, top) {
+        try { localStorage.setItem(key, JSON.stringify({ left: left, top: top })); } catch (e) {}
+    }
+
+    function getSavedPos() { return readPos(PILL_POS_KEY); }
 
     function syncPanelPos() {
         if (!elPanel) return;
-        const saved = getSavedPos();
+        // 优先面板自己拖动保存的位置，其次跟随胶囊位置
+        const saved = readPos(PANEL_POS_KEY) || getSavedPos();
         if (!saved || !saved.left || !saved.top) return;
         elPanel.style.right = 'auto';
         elPanel.style.bottom = 'auto';
@@ -1295,11 +1303,14 @@
         elPanel.style.top = top + 'px';
     }
 
-    function makeDraggable(el) {
+    // el: 要移动的元素；handle: 拖动手柄（默认 el 自身）；posKey: 位置存储键
+    function makeDraggable(el, handle, posKey) {
+        const dragEl = handle || el;
+        posKey = posKey || PILL_POS_KEY;
         let dragging = false, moved = false;
         let startX = 0, startY = 0, origLeft = 0, origTop = 0;
 
-        const saved = getSavedPos();
+        const saved = readPos(posKey);
         if (saved && saved.left && saved.top) {
             el.style.right = 'auto';
             el.style.bottom = 'auto';
@@ -1307,7 +1318,7 @@
             el.style.top = saved.top;
         }
 
-        el.addEventListener('mousedown', (e) => {
+        dragEl.addEventListener('mousedown', (e) => {
             if (e.button !== 0) return;
             dragging = true;
             moved = false;
@@ -1342,15 +1353,13 @@
             dragging = false;
             document.removeEventListener('mousemove', onMove);
             if (moved) {
-                try {
-                    localStorage.setItem(PILL_POS_KEY, JSON.stringify({ left: el.style.left, top: el.style.top }));
-                } catch (e) {}
-                syncPanelPos();
+                writePos(posKey, el.style.left, el.style.top);
+                if (el === elPill) syncPanelPos();   // 胶囊移动后，面板跟随（若面板没有自己的位置）
             }
         }
 
-        // 拖拽后抑制误触的 click（避免拖动结束顺手打开面板）
-        el.addEventListener('click', (e) => {
+        // 拖拽后抑制误触的 click（避免拖动结束顺手触发点击）
+        dragEl.addEventListener('click', (e) => {
             if (moved) {
                 moved = false;
                 e.stopPropagation();
@@ -1544,6 +1553,9 @@
         elPanel.appendChild(btnRow);
         elPanel.appendChild(foot);
         document.body.appendChild(elPanel);
+
+        // 面板顶栏拖拽（位置单独记忆，优先于胶囊位置）
+        makeDraggable(elPanel, head, PANEL_POS_KEY);
 
         // 点击页面其他区域（面板与胶囊之外）自动收起面板（临时收起，不改变记忆偏好）
         document.addEventListener('click', (e) => {
