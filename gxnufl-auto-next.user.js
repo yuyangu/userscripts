@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.5.3
+// @version      3.6.0
 // @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速；支持按视频标题自动生成提问并提交（每节可选一次）；各开关与随机延迟均在右下角面板调节
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -24,6 +24,7 @@
         SPEED: 0,               // 播放倍速：0=不干预；支持自定义输入（最高 16）
         GUARD: true,            // 弹题保护：高倍速时接近题目点自动临时降至 1x，确保题目弹出
         AUTO_ASK: false,        // 自动提问：每节视频自动生成一个问题并提交一次
+        SAVE_DATA: false,       // 省流量模式：不下载视频内容，虚拟推进进度（弹题/进度上报照常）
         DELAY_ANSWER_MIN: 2,    // 答题延迟下限（秒）
         DELAY_ANSWER_MAX: 8,    // 答题延迟上限（秒）—— 0~0 表示关闭
         DELAY_NEXT_MIN: 1,      // 下一节延迟下限（秒）
@@ -551,6 +552,60 @@
         } catch (e) {}
     }
 
+    // ---- 服务端核对：本节的提问列表里是否有我发的（兼容"脚本加记录功能之前"发的提问）----
+    let askedRemoteCache = {};   // key → true/false，避免重复请求
+
+    function getMyUserId() {
+        try {
+            return (window.websiteInfo && window.websiteInfo.data
+                && window.websiteInfo.data.userInfo && window.websiteInfo.data.userInfo.userId) || 0;
+        } catch (e) { return 0; }
+    }
+
+    function getMyName() {
+        try {
+            return (window.websiteInfo && window.websiteInfo.data
+                && window.websiteInfo.data.userInfo && window.websiteInfo.data.userInfo.chinaName) || '';
+        } catch (e) { return ''; }
+    }
+
+    // 查服务端：本节帖子列表里是否有自己的帖子
+    function checkAskedRemote(cb) {
+        const key = getSectionKey();
+        if (!key) { cb(false); return; }
+        if (askedRemoteCache[key] !== undefined) { cb(askedRemoteCache[key]); return; }
+        if (!jq || !jq.ajaxPlus) { cb(false); return; }
+        const myId = getMyUserId();
+        const myName = getMyName();
+        try {
+            jq.ajaxPlus({
+                url: '/multilingual/queryDiscussPostList',
+                data: { subsectionId: key, size: 50, page: 1 },
+                success: function (d) {
+                    const list = (d && d.DiscussPostList) || [];
+                    const has = list.some(p =>
+                        (myId && String(p.creatorId) === String(myId)) ||
+                        (myName && p.creatorName === myName)
+                    );
+                    askedRemoteCache[key] = has;
+                    cb(has);
+                },
+                error: function () { cb(false); },
+            });
+        } catch (e) { cb(false); }
+    }
+
+    // 统一的"本节是否已提问"判断：本地记录优先，其次查服务端（查到则回填本地）
+    function checkAsked(cb) {
+        const key = getSectionKey();
+        if (!key) { cb(false); return; }
+        if (isSectionAsked(key)) { cb(true); return; }
+        checkAskedRemote((has) => {
+            if (has) markSectionAsked(key);
+            cb(has);
+        });
+    }
+
     // 填写并提交一个问题；返回是否成功触发
     function submitQuestion() {
         const titleEl = document.querySelector('.question_student_title');
@@ -600,35 +655,175 @@
 
         const key = getSectionKey();
         if (!key) return;
-        if (isSectionAsked(key)) return;   // 本节已提问 → 自动模式直接跳过（不弹框）
 
         askInFlight = true;
-        if (submitQuestion()) {
-            log('本节自动提问完成，已记录', key);
-        }
-        askInFlight = false;
+        checkAsked((has) => {
+            if (!has && submitQuestion()) {
+                log('本节自动提问完成，已记录', key);
+            }
+            askInFlight = false;
+        });
     }
 
-    // 手动提问入口：已提问过则弹确认框（"是否还要提问？"）
+    // 手动提问入口：先查本地记录+服务端列表，已提问则弹确认框（"是否还要提问？"）
     function askWithConfirm() {
-        const key = getSectionKey();
-        if (!isSectionAsked(key)) {
-            submitQuestion();
+        setStatus('正在检查本节是否已提问…', 'busy');
+        checkAsked((has) => {
+            if (!has) {
+                submitQuestion();
+                return;
+            }
+            const msg = '这个视频已经提问过一次了，是否还要提问？';
+            // 优先用页面自带的 alertBox（样式与平台一致，带按钮回调）
+            if (typeof window.alertBox === 'function') {
+                try {
+                    window.alertBox(msg, ['确定', '取消'], [
+                        function () { submitQuestion(); },
+                        function () { /* 取消：不做任何事 */ },
+                    ]);
+                    return;
+                } catch (e) {}
+            }
+            // 回退：原生 confirm
+            if (window.confirm(msg)) submitQuestion();
+        });
+    }
+
+    // ===================== 省流量模式（不下载视频，虚拟推进进度） =====================
+    // 原理：视频卡在下载上。此模式只预加载 metadata（文件头几 KB）拿到总时长，
+    // 然后把 <video> 换成"虚拟播放器"：不下载画面，用定时器推进 currentTime 并触发
+    // timeupdate —— 平台的进度上报（每 60 秒一次）与弹题检测（逐秒比对）都照常工作。
+    let saveModeActive = false;   // 是否已启用虚拟播放
+    let savePending = false;      // 正在等待 metadata
+    let savePendingAt = 0;        // 等待开始时间（超时兜底）
+    let virtualTime = 0;          // 虚拟播放时间（秒）
+    let virtualPlaying = false;   // 虚拟播放状态
+    let virtualTimer = null;      // 虚拟推进定时器
+    let realDuration = 0;         // 真实视频总时长
+    const origMembers = {};       // 原始属性/方法（关闭时还原用）
+
+    function enableSaveData(video) {
+        if (!video || saveModeActive) return;
+        if (savePending) {
+            if (Date.now() - savePendingAt > 15000) { savePending = false; }  // 超时兜底
+            else return;
+        }
+        // 已知时长 → 直接进入虚拟播放
+        if (realDuration > 0) { applyVirtualPlayer(video); return; }
+        if (video.duration && isFinite(video.duration) && video.duration > 0) {
+            realDuration = video.duration;
+            applyVirtualPlayer(video);
             return;
         }
-        const msg = '这个视频已经提问过一次了，是否还要提问？';
-        // 优先用页面自带的 alertBox（样式与平台一致，带按钮回调）
-        if (typeof window.alertBox === 'function') {
+        // 时长未知 → 只预加载 metadata（只下文件头，几 KB）
+        savePending = true;
+        savePendingAt = Date.now();
+        if (!video.dataset.origSrc && video.getAttribute('src')) {
+            video.dataset.origSrc = video.getAttribute('src');
+        }
+        try {
+            video.preload = 'metadata';
+            video.addEventListener('loadedmetadata', function onMeta() {
+                video.removeEventListener('loadedmetadata', onMeta);
+                savePending = false;
+                realDuration = video.duration || 0;
+                applyVirtualPlayer(video);
+            }, { once: true });
+            video.load();
+        } catch (e) { savePending = false; }
+        log('省流量模式：正在读取视频时长（只加载文件头）…');
+    }
+
+    function applyVirtualPlayer(video) {
+        if (saveModeActive || !realDuration) return;
+        // 停止下载
+        try {
+            video.pause();
+            if (!video.dataset.origSrc && video.getAttribute('src')) {
+                video.dataset.origSrc = video.getAttribute('src');
+            }
+            video.preload = 'none';
+            video.removeAttribute('src');   // 断开缓冲（原地址存在 dataset 里）
+            video.load();
+        } catch (e) {}
+
+        // 记录原始定义（便于关闭时还原）
+        ['duration', 'currentTime', 'paused', 'ended'].forEach(k => {
+            origMembers[k] = Object.getOwnPropertyDescriptor(video, k) || null;
+        });
+        origMembers.play = video.play;
+        origMembers.pause = video.pause;
+
+        // 劫持关键属性
+        virtualTime = 0;
+        try {
+            Object.defineProperty(video, 'duration', { configurable: true, get: () => realDuration });
+            Object.defineProperty(video, 'currentTime', {
+                configurable: true,
+                get: () => virtualTime,
+                set: (v) => { virtualTime = Math.max(0, Math.min(Number(v) || 0, realDuration)); },
+            });
+            Object.defineProperty(video, 'paused', { configurable: true, get: () => !virtualPlaying });
+            Object.defineProperty(video, 'ended', { configurable: true, get: () => virtualTime >= realDuration - 0.05 });
+        } catch (e) { log('虚拟播放属性劫持失败', e); return; }
+
+        video.play = function () { virtualPlaying = true; startVirtualTick(video); return Promise.resolve(); };
+        video.pause = function () { virtualPlaying = false; return undefined; };
+
+        saveModeActive = true;
+        // 通知平台：时长已就绪、可以播放
+        try { video.dispatchEvent(new Event('durationchange')); } catch (e) {}
+        try { video.dispatchEvent(new Event('canplay')); } catch (e) {}
+        // 自动开始
+        virtualPlaying = true;
+        startVirtualTick(video);
+        log('省流量模式已启用：不下载视频，虚拟推进进度（总时长 ' + Math.round(realDuration) + ' 秒）');
+    }
+
+    function startVirtualTick(video) {
+        if (virtualTimer) return;
+        virtualTimer = setInterval(() => {
+            if (!saveModeActive || !virtualPlaying) return;
+            const rate = Number(video.playbackRate) || 1;
+            virtualTime = Math.min(virtualTime + 0.25 * rate, realDuration);
+            try { video.dispatchEvent(new Event('timeupdate')); } catch (e) {}
+            if (virtualTime >= realDuration - 0.05) {
+                virtualPlaying = false;
+                if (virtualTimer) { clearInterval(virtualTimer); virtualTimer = null; }
+                try { video.dispatchEvent(new Event('ended')); } catch (e) {}
+            }
+        }, 250);
+    }
+
+    function disableSaveData(video) {
+        if (!saveModeActive || !video) return;
+        const resumeAt = virtualTime;
+        saveModeActive = false;
+        virtualPlaying = false;
+        if (virtualTimer) { clearInterval(virtualTimer); virtualTimer = null; }
+
+        // 还原属性与方法
+        ['duration', 'currentTime', 'paused', 'ended'].forEach(k => {
+            try { delete video[k]; } catch (e) {}
+            if (origMembers[k]) { try { Object.defineProperty(video, k, origMembers[k]); } catch (e) {} }
+        });
+        if (origMembers.play) video.play = origMembers.play;
+        if (origMembers.pause) video.pause = origMembers.pause;
+
+        // 恢复真实视频，并从虚拟进度处继续
+        const src = video.dataset.origSrc;
+        if (src) {
             try {
-                window.alertBox(msg, ['确定', '取消'], [
-                    function () { submitQuestion(); },
-                    function () { /* 取消：不做任何事 */ },
-                ]);
-                return;
+                video.preload = 'auto';
+                video.addEventListener('loadedmetadata', function once() {
+                    try { video.currentTime = Math.min(resumeAt, video.duration || resumeAt); } catch (e) {}
+                    video.play().catch(() => {});
+                }, { once: true });
+                video.src = src;
+                video.load();
             } catch (e) {}
         }
-        // 回退：原生 confirm
-        if (window.confirm(msg)) submitQuestion();
+        log('省流量模式已关闭，恢复真实视频');
     }
 
     // ===================== 下一节 & 自动播放 =====================
@@ -758,7 +953,7 @@
         document.head.appendChild(style);
     }
 
-    function makeSwitch(key) {
+    function makeSwitch(key, onChange) {
         const sw = document.createElement('div');
         sw.className = 'gx-switch' + (state[key] ? ' on' : '');
         const knob = document.createElement('span');
@@ -770,6 +965,7 @@
             sw.classList.toggle('on', state[key]);
             saveState();
             log(key, '=', state[key]);
+            if (typeof onChange === 'function') onChange(state[key]);
         });
         return sw;
     }
@@ -935,6 +1131,12 @@
         bodyBox.appendChild(makeRow('播放倍速', makeSpeedInput()));
         bodyBox.appendChild(makeRow('弹题保护', makeSwitch('GUARD')));
         bodyBox.appendChild(makeRow('自动提问', makeSwitch('AUTO_ASK')));
+        bodyBox.appendChild(makeRow('省流量模式', makeSwitch('SAVE_DATA', (on) => {
+            const v = getVideo();
+            if (!v) return;
+            if (on) enableSaveData(v);
+            else disableSaveData(v);
+        })));
         bodyBox.appendChild(makeRow('答题延迟', makeDelayInputs('DELAY_ANSWER_MIN', 'DELAY_ANSWER_MAX')));
         bodyBox.appendChild(makeRow('下一节延迟', makeDelayInputs('DELAY_NEXT_MIN', 'DELAY_NEXT_MAX')));
 
@@ -1001,6 +1203,11 @@
     // ===================== 主循环 =====================
     function tick() {
         bindVideo();
+        // 省流量模式：确保虚拟播放器已启用（开关记忆为开时，刷新页面后自动生效）
+        if (state.SAVE_DATA) {
+            const v0 = getVideo();
+            if (v0 && !saveModeActive) enableSaveData(v0);
+        }
         const handled = handleQuestion();
         ensurePlaying();
         autoAskTick();
