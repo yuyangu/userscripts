@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.9.0
+// @version      3.9.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -95,6 +95,7 @@
     let lastStatusText = '';
     let lastStatusLevel = '';
     let askInFlight = false;     // 自动提问进行中标记
+    let lastZhsSyncAt = 0;       // 上次同步智慧树完成状态的时间
 
     // ===================== 工具函数 =====================
     function isVisible(el) {
@@ -837,6 +838,60 @@
     // 页面结构：#sourceTree 下的 .file-item（id="file_<fileId>"，点击调 changeFile(id)）
     //          完成状态：.status-box > i.icon-finish
     //          播放器：video#vjs_mediaPlayer_html5_api（video.js）
+    //
+    // 状态同步说明：主窗口资源树是静态的，多开窗口播完不会自动刷新。
+    // 因此用 localStorage 记录「已分配给多开窗口」（2 小时过期）与「多开已播完」，
+    // 避免二次点击时把同一个视频再分配一遍。
+    const ZHS_ASSIGN_KEY = 'gxnufl_zhs_assigned';
+    const ZHS_DONE_KEY = 'gxnufl_zhs_done_local';
+
+    function readJsonMap(key) {
+        try { return JSON.parse(localStorage.getItem(key) || '{}'); } catch (e) { return {}; }
+    }
+    function writeJsonMap(key, m) {
+        try { localStorage.setItem(key, JSON.stringify(m)); } catch (e) {}
+    }
+    function zhsMarkAssigned(id) {
+        if (!id) return;
+        const m = readJsonMap(ZHS_ASSIGN_KEY);
+        m[id] = Date.now();
+        writeJsonMap(ZHS_ASSIGN_KEY, m);
+    }
+    function zhsMarkDoneLocal(id) {
+        if (!id) return;
+        const m = readJsonMap(ZHS_DONE_KEY);
+        m[id] = Date.now();
+        writeJsonMap(ZHS_DONE_KEY, m);
+    }
+    function zhsIsRecentlyAssigned(id) {
+        if (!id) return false;
+        const t = readJsonMap(ZHS_ASSIGN_KEY)[id];
+        return !!t && (Date.now() - t) < 2 * 3600 * 1000;   // 2 小时内视为"正在多开"
+    }
+    function zhsIsDoneLocal(id) {
+        return !!(id && readJsonMap(ZHS_DONE_KEY)[id]);
+    }
+    // 该资源是否"还值得播"：DOM 未完成 + 本地未完成 + 非近期已分配
+    function zhsIsUsable(el) {
+        const id = (el.id || '').replace('file_', '');
+        if (!id) return false;
+        if (zhsIsDone(el)) return false;
+        if (zhsIsDoneLocal(id)) return false;
+        if (zhsIsRecentlyAssigned(id)) return false;
+        return true;
+    }
+    // 把本地"已完成"同步到资源树 DOM（让 ✓ 图标即时显示）
+    function zhsSyncDoneToDom() {
+        const done = readJsonMap(ZHS_DONE_KEY);
+        Object.keys(done).forEach(id => {
+            const el = document.querySelector('#sourceTree .file-item#file_' + id);
+            if (el && !zhsIsDone(el)) {
+                const box = el.querySelector('.status-box');
+                if (box) box.innerHTML = '<i class="icon-finish"></i>';
+            }
+        });
+    }
+
     function zhsCurrentFileId() {
         const m = location.search.match(/[?&]fileId=(\d+)/);
         return m ? m[1] : '';
@@ -850,7 +905,7 @@
         return !!(el && el.querySelector('.status-box .icon-finish'));
     }
 
-    // 找下一个资源：优先"当前之后第一个未完成"，其次从头找未完成
+    // 找下一个资源：优先"当前之后第一个可用"，其次从头补漏
     function zhsNextFile() {
         const items = zhsFileItems();
         if (!items.length) return null;
@@ -858,10 +913,10 @@
         let curIdx = items.findIndex(el => (el.id || '').replace('file_', '') === curId);
         if (curIdx < 0) curIdx = -1;
         for (let i = curIdx + 1; i < items.length; i++) {
-            if (!zhsIsDone(items[i])) return items[i];
+            if (zhsIsUsable(items[i])) return items[i];
         }
         for (let i = 0; i <= curIdx && i >= 0; i++) {
-            if (!zhsIsDone(items[i])) return items[i];
+            if (zhsIsUsable(items[i])) return items[i];
         }
         return null;
     }
@@ -888,7 +943,7 @@
         const curId = zhsCurrentFileId();
         return zhsFileItems().filter(el => {
             const id = (el.id || '').replace('file_', '');
-            return id && id !== curId && !zhsIsDone(el);
+            return id && id !== curId && zhsIsUsable(el);
         });
     }
 
@@ -913,7 +968,10 @@
             const url = base + '?courseId=' + cid + '&fileId=' + id + '&gxParallel=1';
             try {
                 const w = window.open(url, '_blank', 'width=1100,height=700');
-                if (w) opened++;
+                if (w) {
+                    opened++;
+                    zhsMarkAssigned(id);   // 记录已分配，防止二次点击重复开同一批
+                }
             } catch (e) {}
         }
         if (opened) {
@@ -1016,6 +1074,7 @@
             if (IS_ZHS) {
                 // 多开窗口：播完自动关闭自己（避免多个窗口切到同一个资源）
                 if (zhsIsParallelWindow()) {
+                    zhsMarkDoneLocal(zhsCurrentFileId());   // 记录已完成（主窗口资源树会同步 ✓）
                     log('多开窗口：本资源播完，2 秒后自动关闭');
                     setTimeout(() => { try { window.close(); } catch (e) {} }, 2000);
                     return;
@@ -1585,6 +1644,11 @@
     // ===================== 主循环 =====================
     function tick() {
         bindVideo();
+        // 智慧树：把本地完成状态同步到资源树（✓ 即时显示），2 秒一次
+        if (IS_ZHS && Date.now() - lastZhsSyncAt > 2000) {
+            lastZhsSyncAt = Date.now();
+            zhsSyncDoneToDom();
+        }
         // 省流量模式：确保虚拟播放器已启用（智慧树同样支持：不下载画面，学习时长按真实时间照常累计）
         if (state.SAVE_DATA) {
             const v0 = getVideo();
