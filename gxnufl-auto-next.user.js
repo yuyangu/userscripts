@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.5.2
+// @version      3.5.3
 // @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速；支持按视频标题自动生成提问并提交（每节可选一次）；各开关与随机延迟均在右下角面板调节
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -532,6 +532,25 @@
         });
     }
 
+    // 本节是否已经提问过
+    function isSectionAsked(key) {
+        if (!key) return false;
+        try {
+            const asked = JSON.parse(localStorage.getItem(ASK_RECORD_KEY) || '{}');
+            return !!asked[key];
+        } catch (e) { return false; }
+    }
+
+    // 记录本节已提问
+    function markSectionAsked(key) {
+        if (!key) return;
+        try {
+            const asked = JSON.parse(localStorage.getItem(ASK_RECORD_KEY) || '{}');
+            asked[key] = Date.now();
+            localStorage.setItem(ASK_RECORD_KEY, JSON.stringify(asked));
+        } catch (e) {}
+    }
+
     // 填写并提交一个问题；返回是否成功触发
     function submitQuestion() {
         const titleEl = document.querySelector('.question_student_title');
@@ -549,6 +568,7 @@
         fillText(contentEl, q.content);
         log('生成提问：', q.title);
         setStatus('已生成提问，正在提交…', 'busy');
+        markSectionAsked(getSectionKey());   // 记录本节已提问，防止重复
 
         // 稍等片刻（等 tab 切换/赋值完成）再点提交
         setTimeout(() => {
@@ -580,18 +600,35 @@
 
         const key = getSectionKey();
         if (!key) return;
-        let asked = {};
-        try { asked = JSON.parse(localStorage.getItem(ASK_RECORD_KEY) || '{}'); } catch (e) {}
-        if (asked[key]) return;
+        if (isSectionAsked(key)) return;   // 本节已提问 → 自动模式直接跳过（不弹框）
 
         askInFlight = true;
-        const ok = submitQuestion();
-        if (ok) {
-            asked[key] = Date.now();
-            try { localStorage.setItem(ASK_RECORD_KEY, JSON.stringify(asked)); } catch (e) {}
+        if (submitQuestion()) {
             log('本节自动提问完成，已记录', key);
         }
         askInFlight = false;
+    }
+
+    // 手动提问入口：已提问过则弹确认框（"是否还要提问？"）
+    function askWithConfirm() {
+        const key = getSectionKey();
+        if (!isSectionAsked(key)) {
+            submitQuestion();
+            return;
+        }
+        const msg = '这个视频已经提问过一次了，是否还要提问？';
+        // 优先用页面自带的 alertBox（样式与平台一致，带按钮回调）
+        if (typeof window.alertBox === 'function') {
+            try {
+                window.alertBox(msg, ['确定', '取消'], [
+                    function () { submitQuestion(); },
+                    function () { /* 取消：不做任何事 */ },
+                ]);
+                return;
+            } catch (e) {}
+        }
+        // 回退：原生 confirm
+        if (window.confirm(msg)) submitQuestion();
     }
 
     // ===================== 下一节 & 自动播放 =====================
@@ -923,8 +960,8 @@
         ask.textContent = '立即提问';
         ask.title = '根据视频标题生成一个问题并提交';
         ask.addEventListener('click', () => {
-            // 手动提问：不受"本节已提问"记录限制
-            submitQuestion();
+            // 手动提问：已提问过会弹确认框
+            askWithConfirm();
         });
 
         btnRow.appendChild(jump);
