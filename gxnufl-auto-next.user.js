@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.6.2
-// @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速；支持按视频标题自动生成提问并提交（每节可选一次）；各开关与随机延迟均在右下角面板调节
+// @version      3.7.0
+// @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
+// @match        https://*.zhihuishu.com/*
 // @grant        none
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/yuyangu/userscripts/main/gxnufl-auto-next.user.js
@@ -40,6 +41,7 @@
     };
     const ASK_RECORD_KEY = 'gxnufl_asked_sections';   // 已自动提问过的小节记录
     const START_AT = Date.now();
+    const IS_ZHS = /zhihuishu\.com$/i.test(location.hostname);   // 智慧树网模式
 
     // ===================== 设置持久化（localStorage） =====================
     const STORAGE_KEY = 'gxnufl_auto_settings_v3';
@@ -143,6 +145,9 @@
     }
 
     function getVideo() {
+        if (IS_ZHS) {
+            return document.querySelector('video#vjs_mediaPlayer_html5_api') || document.querySelector('video');
+        }
         return document.querySelector('video.videoplayer');
     }
 
@@ -648,7 +653,7 @@
 
     // 自动提问主检查（每节只问一次，记录在 localStorage）
     function autoAskTick() {
-        if (!state.AUTO_ASK || askInFlight) return;
+        if (!state.AUTO_ASK || askInFlight || IS_ZHS) return;
         if (Date.now() - START_AT < FIXED.ASK_READY_AT) return;   // 等页面初始化
         const v = getVideo();
         if (!v || v.readyState < 1) return;                       // 等视频元数据
@@ -826,6 +831,70 @@
         log('省流量模式已关闭，恢复真实视频');
     }
 
+    // ===================== 智慧树网适配（资料学习页） =====================
+    // 页面结构：#sourceTree 下的 .file-item（id="file_<fileId>"，点击调 changeFile(id)）
+    //          完成状态：.status-box > i.icon-finish
+    //          播放器：video#vjs_mediaPlayer_html5_api（video.js）
+    function zhsCurrentFileId() {
+        const m = location.search.match(/[?&]fileId=(\d+)/);
+        return m ? m[1] : '';
+    }
+
+    function zhsFileItems() {
+        return Array.from(document.querySelectorAll('#sourceTree .file-item'));
+    }
+
+    function zhsIsDone(el) {
+        return !!(el && el.querySelector('.status-box .icon-finish'));
+    }
+
+    // 找下一个资源：优先"当前之后第一个未完成"，其次从头找未完成
+    function zhsNextFile() {
+        const items = zhsFileItems();
+        if (!items.length) return null;
+        const curId = zhsCurrentFileId();
+        let curIdx = items.findIndex(el => (el.id || '').replace('file_', '') === curId);
+        if (curIdx < 0) curIdx = -1;
+        for (let i = curIdx + 1; i < items.length; i++) {
+            if (!zhsIsDone(items[i])) return items[i];
+        }
+        for (let i = 0; i <= curIdx && i >= 0; i++) {
+            if (!zhsIsDone(items[i])) return items[i];
+        }
+        return null;
+    }
+
+    function zhsSwitchTo(el) {
+        if (!el) return false;
+        const id = (el.id || '').replace('file_', '');
+        if (!id) return false;
+        if (typeof window.changeFile === 'function') {
+            window.changeFile(id);
+            return true;
+        }
+        return clickEl(el);
+    }
+
+    // 本资源播完 → 随机延迟后切下一个未完成资源
+    function scheduleZhsNext() {
+        if (nextTimer) return;
+        let delay = randNextDelay();
+        if (delay < FIXED.NEXT_FLOOR) delay = FIXED.NEXT_FLOOR;
+        nextPendingAt = Date.now() + delay;
+        nextTimer = setTimeout(() => {
+            nextTimer = null;
+            nextPendingAt = 0;
+            const nf = zhsNextFile();
+            if (nf) {
+                log('本资源播完 → 切换下一个未完成资源');
+                zhsSwitchTo(nf);
+            } else {
+                log('所有资源都已完成');
+                setStatus('全部资源已完成', 'ok');
+            }
+        }, delay);
+    }
+
     // ===================== 下一节 & 自动播放 =====================
     let nextTimer = null;
     function scheduleNext() {
@@ -895,6 +964,10 @@
         if (v.dataset.gxnuflBound) return;
         v.dataset.gxnuflBound = '1';
         v.addEventListener('ended', () => {
+            if (IS_ZHS) {
+                if (state.AUTO_NEXT) scheduleZhsNext();
+                return;
+            }
             if (state.AUTO_NEXT) scheduleNext();
         });
     }
@@ -1333,8 +1406,18 @@
 
         const jump = document.createElement('button');
         jump.className = 'gx-jump';
-        jump.textContent = '立即跳下一节';
+        jump.textContent = IS_ZHS ? '下一个资源' : '立即跳下一节';
         jump.addEventListener('click', () => {
+            if (IS_ZHS) {
+                const nf = zhsNextFile();
+                if (nf) {
+                    zhsSwitchTo(nf);
+                    setStatus('已切换到下一个资源', 'busy');
+                } else {
+                    setStatus('没有下一个未完成的资源', 'warn');
+                }
+                return;
+            }
             jumpNextChapter();
         });
 
@@ -1346,6 +1429,18 @@
             // 手动提问：已提问过会弹确认框
             askWithConfirm();
         });
+        if (IS_ZHS) ask.style.display = 'none';   // 智慧树资料页无此提问面板
+
+        // 智慧树模式：隐藏不适用的功能行
+        if (IS_ZHS) {
+            ['自动答题', '字幕匹配答案', '弹题保护', '自动提问', '省流量模式'].forEach(name => {
+                const row = Array.from(bodyBox.querySelectorAll('.gx-row')).find(r => {
+                    const l = r.querySelector('.gx-label');
+                    return l && l.textContent === name;
+                });
+                if (row) row.style.display = 'none';
+            });
+        }
 
         btnRow.appendChild(jump);
         btnRow.appendChild(ask);
@@ -1384,8 +1479,8 @@
     // ===================== 主循环 =====================
     function tick() {
         bindVideo();
-        // 省流量模式：确保虚拟播放器已启用（开关记忆为开时，刷新页面后自动生效）
-        if (state.SAVE_DATA) {
+        // 省流量模式：确保虚拟播放器已启用（智慧树不启用，避免破坏其播放器状态机）
+        if (state.SAVE_DATA && !IS_ZHS) {
             const v0 = getVideo();
             if (v0 && !saveModeActive) enableSaveData(v0);
         }
@@ -1419,6 +1514,8 @@
         const v = getVideo();
         if (!v) {
             setStatus('等待视频加载…', 'off');
+        } else if (IS_ZHS) {
+            setStatus('智慧树模式 · 自动刷资源中', 'ok');
         } else if (!state.AUTO_NEXT && !state.AUTO_ANSWER && !state.AUTO_PLAY) {
             setStatus('全部功能已关闭', 'off');
         } else {
