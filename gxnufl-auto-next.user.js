@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.5.0
+// @version      3.5.1
 // @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速；支持按视频标题自动生成提问并提交（每节可选一次）；各开关与随机延迟均在右下角面板调节
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -501,36 +501,22 @@
         return (el.getAttribute('title') || el.innerText || '').trim();
     }
 
-    // 根据视频标题生成一个问题（标题 + 内容），从模板随机选一个
+    // 根据视频标题生成一个问题：标题直接用完整问题（列表里能直接看到全貌），内容补一句客套
     function genQuestion() {
-        let videoTitle = getVideoTitle() || 'this video';
-        // 去掉开头的章节序号（如 "3.2 "、"Unit 3 "），保留主题
-        let topic = videoTitle.replace(/^\s*(?:unit\s*\d+[\s.:・-]*)?(?:[\d.]+\s*)?/i, '').trim();
-        if (!topic) topic = videoTitle;
+        const videoTitle = getVideoTitle() || 'this video';
 
         const bank = [
-            {
-                title: 'A question about "' + topic + '"',
-                content: 'In the video "' + videoTitle + '", what are the main challenges mentioned, and how can we deal with them in our daily life?',
-            },
-            {
-                title: 'About the key points of "' + topic + '"',
-                content: 'After watching "' + videoTitle + '", I am still a little confused about the key points. Could you explain the main idea of this part with one more example?',
-            },
-            {
-                title: 'How can we apply "' + topic + '" in practice?',
-                content: 'The video "' + videoTitle + '" gives some useful ideas. I wonder how we can put them into practice in real situations. Could you give some suggestions?',
-            },
-            {
-                title: 'A question on the expressions in "' + topic + '"',
-                content: 'In "' + videoTitle + '", there are several important expressions. Could you help me understand how to use them correctly in speaking and writing?',
-            },
-            {
-                title: 'What is the main idea of "' + topic + '"?',
-                content: 'I would like to ask about the structure of "' + videoTitle + '". What is the main idea of this section, and how are the ideas organized?',
-            },
+            'In the video "' + videoTitle + '", what are the main challenges mentioned, and how can we deal with them in our daily life?',
+            'After watching "' + videoTitle + '", I am still a little confused about the key points. Could you explain the main idea with one more example?',
+            'The video "' + videoTitle + '" gives some useful ideas. How can we apply them in real situations? Could you give some suggestions?',
+            'In "' + videoTitle + '", there are several important expressions. Could you explain how to use them correctly in speaking and writing?',
+            'What is the main idea of "' + videoTitle + '", and how are the ideas organized?',
         ];
-        return bank[Math.floor(Math.random() * bank.length)];
+        const q = bank[Math.floor(Math.random() * bank.length)];
+        return {
+            title: q,                                  // 标题 = 完整问题
+            content: q + '\n\nLooking forward to your answer. Thank you!',
+        };
     }
 
     // 关闭匹配关键词的 alertBox 提示（页面自定义弹窗）
