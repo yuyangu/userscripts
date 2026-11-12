@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.6.0
+// @version      3.6.1
 // @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速；支持按视频标题自动生成提问并提交（每节可选一次）；各开关与随机延迟均在右下角面板调节
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -945,6 +945,27 @@
     cursor: pointer; font-size: 12px; font-family: inherit;
 }
 #gxnufl-panel .gx-ask:hover { background: rgba(79,142,247,0.3); color: #c3d8ff; }
+#gxnufl-panel .gx-label-wrap { position: relative; display: inline-flex; align-items: center; gap: 4px; }
+#gxnufl-panel .gx-info {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 13px; height: 13px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.4); color: #9aa0a6;
+    font-size: 9px; line-height: 1; cursor: help; font-weight: 700;
+    flex: 0 0 auto;
+}
+#gxnufl-panel .gx-info:hover { border-color: #7ee2a8; color: #7ee2a8; }
+#gxnufl-panel .gx-tip {
+    display: none; position: absolute; left: 0; top: 100%; margin-top: 4px;
+    width: 196px; padding: 6px 8px; border-radius: 6px;
+    background: rgba(42,46,50,0.98); color: #e8eaed;
+    border: 1px solid rgba(255,255,255,0.18);
+    font-size: 11px; line-height: 1.5; white-space: normal;
+    z-index: 20; pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+}
+#gxnufl-panel .gx-info:hover + .gx-tip { display: block; }
+#gxnufl-pill { cursor: grab; }
+#gxnufl-pill:active { cursor: grabbing; }
 #gxnufl-panel .gx-foot { margin-top: 7px; font-size: 10.5px; color: #8a8f98; text-align: center; }
         `;
         const style = document.createElement('style');
@@ -970,13 +991,27 @@
         return sw;
     }
 
-    function makeRow(label, node) {
+    function makeRow(label, node, tip) {
         const r = document.createElement('div');
         r.className = 'gx-row';
+        const left = document.createElement('span');
+        left.className = 'gx-label-wrap';
         const l = document.createElement('span');
         l.className = 'gx-label';
         l.textContent = label;
-        r.appendChild(l);
+        left.appendChild(l);
+        if (tip) {
+            const icon = document.createElement('span');
+            icon.className = 'gx-info';
+            icon.textContent = '!';
+            icon.title = '';
+            const tipEl = document.createElement('span');
+            tipEl.className = 'gx-tip';
+            tipEl.textContent = tip;
+            left.appendChild(icon);
+            left.appendChild(tipEl);
+        }
+        r.appendChild(left);
         r.appendChild(node);
         return r;
     }
@@ -1073,6 +1108,109 @@
         return wrap;
     }
 
+    // ---- 胶囊拖拽（位置记忆）+ 面板位置同步 ----
+    const PILL_POS_KEY = 'gxnufl_pill_pos';
+
+    function getSavedPos() {
+        try { return JSON.parse(localStorage.getItem(PILL_POS_KEY) || 'null'); } catch (e) { return null; }
+    }
+
+    function syncPanelPos() {
+        if (!elPanel) return;
+        const saved = getSavedPos();
+        if (!saved || !saved.left || !saved.top) return;
+        elPanel.style.right = 'auto';
+        elPanel.style.bottom = 'auto';
+        elPanel.style.left = saved.left;
+        elPanel.style.top = saved.top;
+        // 边界修正（面板比胶囊宽，可能超出屏幕）
+        const r = elPanel.getBoundingClientRect();
+        let left = r.left, top = r.top;
+        if (left + r.width > window.innerWidth - 4) left = window.innerWidth - r.width - 4;
+        if (top + r.height > window.innerHeight - 4) top = window.innerHeight - r.height - 4;
+        if (left < 4) left = 4;
+        if (top < 4) top = 4;
+        elPanel.style.left = left + 'px';
+        elPanel.style.top = top + 'px';
+    }
+
+    function makeDraggable(el) {
+        let dragging = false, moved = false;
+        let startX = 0, startY = 0, origLeft = 0, origTop = 0;
+
+        const saved = getSavedPos();
+        if (saved && saved.left && saved.top) {
+            el.style.right = 'auto';
+            el.style.bottom = 'auto';
+            el.style.left = saved.left;
+            el.style.top = saved.top;
+        }
+
+        el.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            dragging = true;
+            moved = false;
+            const rect = el.getBoundingClientRect();
+            startX = e.clientX;
+            startY = e.clientY;
+            origLeft = rect.left;
+            origTop = rect.top;
+            el.style.right = 'auto';
+            el.style.bottom = 'auto';
+            el.style.left = origLeft + 'px';
+            el.style.top = origTop + 'px';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp, { once: true });
+            e.preventDefault();
+        });
+
+        function onMove(e) {
+            if (!dragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
+            let x = origLeft + dx;
+            let y = origTop + dy;
+            x = Math.max(0, Math.min(x, window.innerWidth - el.offsetWidth - 2));
+            y = Math.max(0, Math.min(y, window.innerHeight - el.offsetHeight - 2));
+            el.style.left = x + 'px';
+            el.style.top = y + 'px';
+        }
+
+        function onUp() {
+            dragging = false;
+            document.removeEventListener('mousemove', onMove);
+            if (moved) {
+                try {
+                    localStorage.setItem(PILL_POS_KEY, JSON.stringify({ left: el.style.left, top: el.style.top }));
+                } catch (e) {}
+                syncPanelPos();
+            }
+        }
+
+        // 拖拽后抑制误触的 click（避免拖动结束顺手打开面板）
+        el.addEventListener('click', (e) => {
+            if (moved) {
+                moved = false;
+                e.stopPropagation();
+                e.preventDefault();
+            }
+        }, true);
+    }
+
+    // 移除页面"浏览器版本过低"提示条（fixed 定位横幅，无 class，按文本+样式匹配）
+    function removeBrowserTip() {
+        const fixedEls = document.querySelectorAll('div[style*="position: fixed"], div[style*="position:fixed"]');
+        for (const el of fixedEls) {
+            if (el.innerText && el.innerText.indexOf('浏览器版本过低') !== -1) {
+                el.style.display = 'none';
+                log('已移除"浏览器版本过低"提示条');
+                return true;
+            }
+        }
+        return false;
+    }
+
     // 面板运行时可见状态；persist=false 时仅改变本次显示（临时收起），不写入持久化偏好
     let panelVisible = false;
     function setPanelOpen(open, persist) {
@@ -1081,7 +1219,10 @@
             state._panelOpen = open;
             saveState();
         }
-        if (elPanel) elPanel.style.display = open ? 'block' : 'none';
+        if (elPanel) {
+            elPanel.style.display = open ? 'block' : 'none';
+            if (open) syncPanelPos();
+        }
         if (elPill) elPill.style.display = open ? 'none' : 'flex';
     }
 
@@ -1097,9 +1238,10 @@
         pillText.textContent = '刷课助手';
         elPill.appendChild(elPillDot);
         elPill.appendChild(pillText);
-        elPill.title = '点击打开设置面板';
+        elPill.title = '点击打开设置面板，按住可拖动位置';
         elPill.addEventListener('click', () => setPanelOpen(true));
         document.body.appendChild(elPill);
+        makeDraggable(elPill);
 
         // 展开态：设置面板
         elPanel = document.createElement('div');
@@ -1123,22 +1265,33 @@
         elStatus.textContent = '初始化中…';
 
         const bodyBox = document.createElement('div');
-        bodyBox.appendChild(makeRow('自动下一节', makeSwitch('AUTO_NEXT')));
-        bodyBox.appendChild(makeRow('自动答题', makeSwitch('AUTO_ANSWER')));
-        bodyBox.appendChild(makeRow('自动续播', makeSwitch('AUTO_PLAY')));
-        bodyBox.appendChild(makeRow('字幕匹配答案', makeSwitch('USE_SUBTITLE')));
-        bodyBox.appendChild(makeRow('静音', makeSwitch('MUTE')));
-        bodyBox.appendChild(makeRow('播放倍速', makeSpeedInput()));
-        bodyBox.appendChild(makeRow('弹题保护', makeSwitch('GUARD')));
-        bodyBox.appendChild(makeRow('自动提问', makeSwitch('AUTO_ASK')));
+        bodyBox.appendChild(makeRow('自动下一节', makeSwitch('AUTO_NEXT'),
+            '视频播完后自动点击"下一节"，进入下一节继续播放'));
+        bodyBox.appendChild(makeRow('自动答题', makeSwitch('AUTO_ANSWER'),
+            '弹题时自动跳过或作答；答错会自动读取正确答案并重答，确保必答题通过'));
+        bodyBox.appendChild(makeRow('自动续播', makeSwitch('AUTO_PLAY'),
+            '视频被暂停且没有弹题时自动继续播放，防止刷课中断'));
+        bodyBox.appendChild(makeRow('字幕匹配答案', makeSwitch('USE_SUBTITLE'),
+            '单选题优先用视频字幕匹配选项，匹配不到时选第一个'));
+        bodyBox.appendChild(makeRow('静音', makeSwitch('MUTE'),
+            '强制静音播放，不影响进度记录'));
+        bodyBox.appendChild(makeRow('播放倍速', makeSpeedInput(),
+            '0 = 不干预；支持 0~16 倍速。注意：超过 4 倍速时浏览器会自动静音'));
+        bodyBox.appendChild(makeRow('弹题保护', makeSwitch('GUARD'),
+            '高倍速时接近题目时间点会自动降到 1x，确保弹题正常弹出，通过后再恢复高速'));
+        bodyBox.appendChild(makeRow('自动提问', makeSwitch('AUTO_ASK'),
+            '每节视频自动生成一个问题并提交；同一节只问一次，重复时会弹框确认'));
         bodyBox.appendChild(makeRow('省流量模式', makeSwitch('SAVE_DATA', (on) => {
             const v = getVideo();
             if (!v) return;
             if (on) enableSaveData(v);
             else disableSaveData(v);
-        })));
-        bodyBox.appendChild(makeRow('答题延迟', makeDelayInputs('DELAY_ANSWER_MIN', 'DELAY_ANSWER_MAX')));
-        bodyBox.appendChild(makeRow('下一节延迟', makeDelayInputs('DELAY_NEXT_MIN', 'DELAY_NEXT_MAX')));
+        }),
+            '不下载视频画面，用虚拟进度推进；弹题与进度上报照常，几乎不耗流量'));
+        bodyBox.appendChild(makeRow('答题延迟', makeDelayInputs('DELAY_ANSWER_MIN', 'DELAY_ANSWER_MAX'),
+            '弹题后等待的随机秒数（模仿真人审题）；0~0 表示立即作答'));
+        bodyBox.appendChild(makeRow('下一节延迟', makeDelayInputs('DELAY_NEXT_MIN', 'DELAY_NEXT_MAX'),
+            '视频播完后延迟的随机秒数；0~0 表示立即跳转'));
 
         // 按钮区：跳转下一节 + 立即提问
         const btnRow = document.createElement('div');
@@ -1246,8 +1399,12 @@
     }
 
     function start() {
-        log('脚本已启动 v3.5', state);
+        log('脚本已启动 v3.6', state);
         buildUI();
+        // 移除"浏览器版本过低"提示条（页面可能延迟插入，做几次补偿检查）
+        removeBrowserTip();
+        setTimeout(removeBrowserTip, 1200);
+        setInterval(removeBrowserTip, 5000);
         setInterval(tick, FIXED.POLL_MS);
         // 倍速管理用更高频检查（100ms），保证高倍速下能及时在题目点减速
         setInterval(() => {
