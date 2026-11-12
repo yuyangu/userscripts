@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.11.1
+// @version      3.12.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -952,6 +952,62 @@
         });
     }
 
+    // ===================== 智慧树：右侧资源栏可拖拽调宽 =====================
+    const ZHS_SIDEBAR_KEY = 'gxnufl_zhs_sidebar_w';
+    const SIDEBAR_MIN = 240;
+
+    function applySidebarWidth(w) {
+        const right = document.querySelector('.right');
+        const left = document.querySelector('.left');
+        if (!right) return;
+        const max = Math.max(SIDEBAR_MIN + 60, Math.min(760, window.innerWidth - 480));
+        w = Math.max(SIDEBAR_MIN, Math.min(Math.round(w), max));
+        right.style.width = w + 'px';
+        if (left) left.style.right = w + 'px';
+        document.querySelectorAll('.file-item').forEach(el => { el.style.width = w + 'px'; });
+        const h = document.getElementById('gxnufl-sidebar-handle');
+        if (h) h.style.right = w + 'px';
+        try { localStorage.setItem(ZHS_SIDEBAR_KEY, String(w)); } catch (e) {}
+    }
+
+    function initSidebarResizer() {
+        if (!IS_ZHS) return;
+        const right = document.querySelector('.right');
+        if (!right || document.getElementById('gxnufl-sidebar-handle')) return;
+
+        const h = document.createElement('div');
+        h.id = 'gxnufl-sidebar-handle';
+        h.title = '拖动调整资源栏宽度';
+        document.body.appendChild(h);
+
+        let dragging = false, startX = 0, startW = 0;
+        h.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            dragging = true;
+            startX = e.clientX;
+            startW = right.getBoundingClientRect().width;
+            document.body.style.userSelect = 'none';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp, { once: true });
+            e.preventDefault();
+        });
+        function onMove(e) {
+            if (!dragging) return;
+            const dx = startX - e.clientX;   // 往左拖 → 变宽
+            applySidebarWidth(startW + dx);
+        }
+        function onUp() {
+            dragging = false;
+            document.body.style.userSelect = '';
+            document.removeEventListener('mousemove', onMove);
+        }
+
+        // 恢复上次宽度（无记录则保持页面原宽）
+        let saved = 0;
+        try { saved = parseInt(localStorage.getItem(ZHS_SIDEBAR_KEY) || '0', 10); } catch (e) {}
+        applySidebarWidth(saved || right.getBoundingClientRect().width || 304);
+    }
+
     // ===================== 智慧树资源统计（总时长 / 已完成 / 剩余） =====================
     let zhsStat = null;    // { total, done, count, doneCount, map, fetchedAt }
     let elZhsStat = null;
@@ -1382,8 +1438,26 @@
 .file-item { position: relative; }
 .file-item .gx-dur {
     position: absolute; right: 44px; top: 50%; transform: translateY(-50%);
-    font-size: 11px; color: #9aa0a6; font-family: Consolas, "Microsoft YaHei", monospace;
-    white-space: nowrap; pointer-events: none;
+    font-size: 11px; color: #b6bac3; font-family: Consolas, "Microsoft YaHei", monospace;
+    white-space: nowrap; pointer-events: none; z-index: 2;
+    background: rgba(44,45,61,0.92); padding: 1px 4px; border-radius: 3px;
+}
+/* 右侧资源栏可拖拽调宽手柄 */
+#gxnufl-sidebar-handle {
+    position: fixed; top: 0; bottom: 0; width: 7px;
+    cursor: col-resize; z-index: 2147483646;
+    background: transparent; transition: background 0.15s;
+}
+#gxnufl-sidebar-handle:hover { background: rgba(79,142,247,0.45); }
+/* 学习资源页（Vue SPA）：标题完整显示 */
+.gx-zhs-source .file-item { height: auto !important; min-height: 44px; padding: 8px 0; }
+.gx-zhs-source .file-item .file-name {
+    white-space: normal !important; overflow: visible !important; text-overflow: clip !important;
+    height: auto !important; line-height: 1.5 !important; word-break: break-all;
+}
+.gx-zhs-source .file-item .gx-dur {
+    position: static !important; float: right; margin: 2px 0 0 8px;
+    transform: none !important; top: auto !important; right: auto !important;
 }
 #gxnufl-panel .gx-stat {
     margin: 0 0 8px; padding: 5px 8px; border-radius: 6px;
@@ -1840,6 +1914,8 @@
             lastZhsSyncAt = Date.now();
             zhsSyncDoneToDom();
             zhsDecorateDurations();
+            // 页面渲染出侧栏后再初始化拖拽手柄
+            if (!document.getElementById('gxnufl-sidebar-handle')) initSidebarResizer();
         }
         // 省流量模式：确保虚拟播放器已启用（智慧树同样支持：不下载画面，学习时长按真实时间照常累计）
         if (state.SAVE_DATA) {
@@ -1892,8 +1968,11 @@
         removeBrowserTip();
         setTimeout(removeBrowserTip, 1200);
         setInterval(removeBrowserTip, 5000);
-        // 智慧树：加载资源统计（等页面初始化完成）
-        if (IS_ZHS) setTimeout(fetchZhsStats, 2000);
+        // 智慧树：加载资源统计（等页面初始化完成）；学习资源页加样式标记
+        if (IS_ZHS) {
+            if (/^wenda\./i.test(location.hostname)) document.body.classList.add('gx-zhs-source');
+            setTimeout(fetchZhsStats, 2000);
+        }
         setInterval(tick, FIXED.POLL_MS);
         // 倍速管理用更高频检查（100ms），保证高倍速下能及时在题目点减速
         setInterval(() => {
