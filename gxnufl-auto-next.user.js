@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.10.0
+// @version      3.11.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -26,7 +26,7 @@
         GUARD: true,            // 弹题保护：高倍速时接近题目点自动临时降至 1x，确保题目弹出
         AUTO_ASK: false,        // 自动提问：每节视频自动生成一个问题并提交一次
         SAVE_DATA: false,       // 省流量模式：不下载视频内容，虚拟推进进度（弹题/进度上报照常）
-        PARALLEL: 3,            // 智慧树：并行窗口数（多开同时播放）
+        MULTI_WIN: true,        // 智慧树：多开时用独立窗口（false = 浏览器标签页）
         DELAY_ANSWER_MIN: 2,    // 答题延迟下限（秒）
         DELAY_ANSWER_MAX: 8,    // 答题延迟上限（秒）—— 0~0 表示关闭
         DELAY_NEXT_MIN: 1,      // 下一节延迟下限（秒）
@@ -743,6 +743,12 @@
 
     function applyVirtualPlayer(video) {
         if (saveModeActive || !realDuration) return;
+        // 起点：优先视频当前进度；没有则用该资源在服务端的已学时长（避免刷新后进度条从 0 开始）
+        let startAt = Number(video.currentTime) || 0;
+        if (!startAt && zhsStat && zhsStat.map) {
+            const it = zhsStat.map[zhsCurrentFileId()];
+            if (it) startAt = Math.min(it.t, Number(it.s) || 0);
+        }
         // 停止下载
         try {
             video.pause();
@@ -762,7 +768,7 @@
         origMembers.pause = video.pause;
 
         // 劫持关键属性
-        virtualTime = 0;
+        virtualTime = startAt;
         try {
             Object.defineProperty(video, 'duration', { configurable: true, get: () => realDuration });
             Object.defineProperty(video, 'currentTime', {
@@ -892,6 +898,48 @@
         });
     }
 
+    // 秒数 → 时钟格式（mm:ss / h:mm:ss）
+    function fmtClock(sec) {
+        sec = Math.max(0, Math.round(sec));
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = sec % 60;
+        const mm = (h > 0 && m < 10 ? '0' : '') + m;
+        const ss = (s < 10 ? '0' : '') + s;
+        return (h > 0 ? h + ':' : '') + mm + ':' + ss;
+    }
+
+    // 给资源列表每一项后面追加视频时长
+    // 20 号包资料树：.file-item 带 id="file_<fileId>" → 精确匹配
+    // 21 号包学习资源页：Vue 组件无 id → 按文件名匹配（去扩展名）
+    function zhsDecorateDurations() {
+        if (!zhsStat || !zhsStat.map) return;
+        const byName = {};
+        Object.keys(zhsStat.map).forEach(id => {
+            const it = zhsStat.map[id];
+            if (it.name && !byName[it.name]) byName[it.name] = it;
+        });
+        const items = document.querySelectorAll('.file-item');
+        items.forEach(el => {
+            if (el.querySelector('.gx-dur')) return;   // 已加过
+            const nameEl = el.querySelector('.file-name');
+            if (!nameEl) return;
+            const id = (el.id || '').replace('file_', '');
+            let info = id ? zhsStat.map[id] : null;
+            if (!info) {
+                const raw = (nameEl.textContent || '').trim();
+                const noExt = raw.replace(/\.[a-zA-Z0-9]{2,5}$/, '').trim();
+                info = byName[noExt] || byName[raw];
+            }
+            if (!info || !info.t) return;
+            const span = document.createElement('span');
+            span.className = 'gx-dur';
+            span.textContent = fmtClock(info.t);
+            span.title = '视频时长 ' + fmtDuration(info.t);
+            nameEl.parentElement.insertBefore(span, nameEl.nextSibling);
+        });
+    }
+
     // ===================== 智慧树资源统计（总时长 / 已完成 / 剩余） =====================
     let zhsStat = null;    // { total, done, count, doneCount, map, fetchedAt }
     let elZhsStat = null;
@@ -918,7 +966,7 @@
                     count++;
                     const isDone = s >= t;
                     if (isDone) { done += t; doneCount++; }
-                    map[String(n.id)] = { t: t, done: isDone };
+                    map[String(n.id)] = { t: t, s: s, done: isDone, name: String(n.name || '').trim() };
                 }
                 if (n.childList) walk(n.childList);
             });
@@ -936,6 +984,7 @@
             if (!Array.isArray(list)) return;
             zhsStat = computeZhsStat(list);
             renderZhsStat();
+            zhsDecorateDurations();
             log('资源统计：', zhsStat.total, '秒 /', zhsStat.count, '个 / 已完成', zhsStat.doneCount);
         };
         // 优先复用页面的 server 对象（跨域方式与站点一致）
@@ -1018,13 +1067,25 @@
         return m ? m[1] : '';
     }
 
-    // 未完成、且不是当前播放的文件项
+    // 未完成、且不是当前播放的文件项（优先"已看了一部分"的，其次按进度从高到低）
     function zhsPendingFiles() {
         const curId = zhsCurrentFileId();
-        return zhsFileItems().filter(el => {
+        const list = zhsFileItems().filter(el => {
             const id = (el.id || '').replace('file_', '');
             return id && id !== curId && zhsIsUsable(el);
         });
+        if (zhsStat && zhsStat.map) {
+            const getS = el => {
+                const it = zhsStat.map[(el.id || '').replace('file_', '')];
+                return it ? (Number(it.s) || 0) : 0;
+            };
+            list.sort((a, b) => {
+                const sa = getS(a), sb = getS(b);
+                if ((sa > 0) !== (sb > 0)) return sa > 0 ? -1 : 1;   // 有进度的排前面
+                return sb - sa;                                       // 进度大的优先（快完成的先刷完）
+            });
+        }
+        return list;
     }
 
     // 是否"多开"窗口（URL 带 gxParallel=1）——播完自动关闭，避免多个窗口互相抢资源
@@ -1032,22 +1093,24 @@
         return /[?&]gxParallel=1/.test(location.search);
     }
 
-    // 打开 N 个并行窗口，每个播一个未完成资源（进度按真实观看时长累计，多开 = N 倍效率）
-    function openParallelWindows(n) {
+    // 「多开窗口」每次打开的窗口数
+    const MULTI_COUNT = 3;
+
+    // 打开多开窗口：每个播一个未完成资源（优先未看完的），播完自动关闭
+    function openParallelWindows() {
         const cid = zhsCourseId();
         if (!cid) { setStatus('未取到 courseId，无法多开', 'warn'); return; }
         const pend = zhsPendingFiles();
         if (!pend.length) { setStatus('没有待学习的资源了', 'ok'); return; }
-        let total = parseInt(n, 10);
-        if (isNaN(total) || total < 1) total = 3;
-        if (total > 8) total = 8;
+        const total = Math.min(MULTI_COUNT, pend.length);
         const base = location.origin + location.pathname;
+        const feat = state.MULTI_WIN ? 'popup=1,width=1100,height=700' : undefined;
         let opened = 0;
-        for (let i = 0; i < total && i < pend.length; i++) {
+        for (let i = 0; i < total; i++) {
             const id = (pend[i].id || '').replace('file_', '');
             const url = base + '?courseId=' + cid + '&fileId=' + id + '&gxParallel=1';
             try {
-                const w = window.open(url, '_blank', 'width=1100,height=700');
+                const w = feat ? window.open(url, 'gxmulti_' + id, feat) : window.open(url, '_blank');
                 if (w) {
                     opened++;
                     zhsMarkAssigned(id);   // 记录已分配，防止二次点击重复开同一批
@@ -1055,8 +1118,8 @@
             } catch (e) {}
         }
         if (opened) {
-            setStatus('已打开 ' + opened + ' 个并行窗口（各自播完会自动关闭）', 'ok');
-            log('多开：', opened, '个窗口');
+            setStatus('已打开 ' + opened + ' 个' + (state.MULTI_WIN ? '独立窗口' : '标签页') + '（播完自动关闭）', 'ok');
+            log('多开：', opened, '个');
         } else {
             setStatus('窗口被浏览器拦截，请允许本页弹出窗口', 'warn');
         }
@@ -1267,6 +1330,11 @@
 #gxnufl-panel .gx-info:hover + .gx-tip { display: block; }
 #gxnufl-pill { cursor: grab; }
 #gxnufl-pill:active { cursor: grabbing; }
+.file-item .gx-dur {
+    display: inline-block; margin-left: 6px;
+    font-size: 11px; color: #9aa0a6; font-family: Consolas, "Microsoft YaHei", monospace;
+    white-space: nowrap;
+}
 #gxnufl-panel .gx-stat {
     margin: 0 0 8px; padding: 5px 8px; border-radius: 6px;
     background: rgba(79,142,247,0.12); color: #cfd3d6;
@@ -1602,31 +1670,10 @@
             IS_ZHS
                 ? '智慧树按真实观看时长计进度，倍速不会加快进度；建议保持 1x'
                 : '0 = 不干预；支持 0~16 倍速。注意：超过 4 倍速时浏览器会自动静音'));
-        // 智慧树：并行窗口数（多开同时播放，进度按真实观看时长累计）
+        // 智慧树：多开是否使用独立窗口（而非浏览器标签页）
         if (IS_ZHS) {
-            const wrap = document.createElement('span');
-            wrap.className = 'gx-range';
-            const inp = document.createElement('input');
-            inp.type = 'number';
-            inp.min = '1';
-            inp.max = '8';
-            inp.step = '1';
-            inp.className = 'gx-num';
-            inp.value = state.PARALLEL;
-            const unit = document.createElement('span');
-            unit.textContent = '个';
-            inp.addEventListener('change', () => {
-                let v = parseInt(inp.value, 10);
-                if (isNaN(v) || v < 1) v = 1;
-                if (v > 8) v = 8;
-                state.PARALLEL = v;
-                inp.value = v;
-                saveState();
-            });
-            wrap.appendChild(inp);
-            wrap.appendChild(unit);
-            bodyBox.appendChild(makeRow('并行窗口', wrap,
-                '点「多开播放」时同时打开几个窗口，每个播一个未完成资源；播完自动关闭'));
+            bodyBox.appendChild(makeRow('独立窗口', makeSwitch('MULTI_WIN'),
+                '开启时「多开窗口」用独立窗口打开（可并排查看）；关闭则用浏览器标签页'));
         }
         bodyBox.appendChild(makeRow('弹题保护', makeSwitch('GUARD'),
             '高倍速时接近题目时间点会自动降到 1x，确保弹题正常弹出，通过后再恢复高速'));
@@ -1680,9 +1727,9 @@
             ask.style.display = 'none';   // 智慧树资料页无此提问面板
             parBtn = document.createElement('button');
             parBtn.className = 'gx-ask';
-            parBtn.textContent = '多开播放';
-            parBtn.title = '按"并行窗口"数量打开窗口，每个播一个未完成资源（播完自动关闭）';
-            parBtn.addEventListener('click', () => openParallelWindows(state.PARALLEL));
+            parBtn.textContent = '多开窗口';
+            parBtn.title = '每次打开 ' + MULTI_COUNT + ' 个窗口，各播一个未完成资源（优先未看完的，播完自动关闭）';
+            parBtn.addEventListener('click', () => openParallelWindows());
         }
 
         // 智慧树模式：隐藏不适用的功能行
@@ -1738,10 +1785,11 @@
     // ===================== 主循环 =====================
     function tick() {
         bindVideo();
-        // 智慧树：把本地完成状态同步到资源树（✓ 即时显示），2 秒一次
+        // 智慧树：把本地完成状态同步到资源树（✓ 即时显示）并补齐时长标注，2 秒一次
         if (IS_ZHS && Date.now() - lastZhsSyncAt > 2000) {
             lastZhsSyncAt = Date.now();
             zhsSyncDoneToDom();
+            zhsDecorateDurations();
         }
         // 省流量模式：确保虚拟播放器已启用（智慧树同样支持：不下载画面，学习时长按真实时间照常累计）
         if (state.SAVE_DATA) {
