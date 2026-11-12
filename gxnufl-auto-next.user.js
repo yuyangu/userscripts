@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.6.1
+// @version      3.6.2
 // @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速；支持按视频标题自动生成提问并提交（每节可选一次）；各开关与随机延迟均在右下角面板调节
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -844,6 +844,40 @@
         }, delay);
     }
 
+    // 手动"下一节"：进度不足时先确认（避免把没看完的视频跳过 → 该视频不计入成绩）
+    function jumpNextChapter() {
+        const v = getVideo();
+        let pct = -1;   // -1 = 无法判断
+        if (v && v.duration && isFinite(v.duration) && v.duration > 0) {
+            pct = Math.min(100, Math.round((v.currentTime / v.duration) * 100));
+        }
+        if (pct >= 99) { doJumpNext(); return; }
+
+        const msg = pct >= 0
+            ? '本节视频还没看完（已看 ' + pct + '%），跳过将不计入视频成绩。确定要跳吗？'
+            : '暂时无法确认本节观看进度，跳过可能不计入视频成绩。确定要跳吗？';
+        if (typeof window.alertBox === 'function') {
+            try {
+                window.alertBox(msg, ['确定跳转', '取消'], [
+                    function () { doJumpNext(); },
+                    function () { /* 取消 */ },
+                ]);
+                return;
+            } catch (e) {}
+        }
+        if (window.confirm(msg)) doJumpNext();
+    }
+
+    function doJumpNext() {
+        const btn = document.querySelector('.next_chapter');
+        if (btn && isVisible(btn)) {
+            clickEl(btn);
+            setStatus('已手动跳到下一节', 'busy');
+        } else {
+            setStatus('未找到"下一节"按钮', 'warn');
+        }
+    }
+
     function ensurePlaying() {
         const v = getVideo();
         if (!v) return;
@@ -1301,13 +1335,7 @@
         jump.className = 'gx-jump';
         jump.textContent = '立即跳下一节';
         jump.addEventListener('click', () => {
-            const btn = document.querySelector('.next_chapter');
-            if (btn && isVisible(btn)) {
-                clickEl(btn);
-                setStatus('已手动跳到下一节', 'busy');
-            } else {
-                setStatus('未找到"下一节"按钮', 'warn');
-            }
+            jumpNextChapter();
         });
 
         const ask = document.createElement('button');
