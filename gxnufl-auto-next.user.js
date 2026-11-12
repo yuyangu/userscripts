@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.5.1
+// @version      3.5.2
 // @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速；支持按视频标题自动生成提问并提交（每节可选一次）；各开关与随机延迟均在右下角面板调节
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -501,20 +501,19 @@
         return (el.getAttribute('title') || el.innerText || '').trim();
     }
 
-    // 根据视频标题生成一个问题：标题直接用完整问题（列表里能直接看到全貌），内容补一句客套
+    // 生成一个提问：标题即问题本身（不带"In the video…"等引导语），内容补一句客套
+    // 与视频的关联由平台自动记录（提交时带 subsectionId + showTime）
     function genQuestion() {
-        const videoTitle = getVideoTitle() || 'this video';
-
         const bank = [
-            'In the video "' + videoTitle + '", what are the main challenges mentioned, and how can we deal with them in our daily life?',
-            'After watching "' + videoTitle + '", I am still a little confused about the key points. Could you explain the main idea with one more example?',
-            'The video "' + videoTitle + '" gives some useful ideas. How can we apply them in real situations? Could you give some suggestions?',
-            'In "' + videoTitle + '", there are several important expressions. Could you explain how to use them correctly in speaking and writing?',
-            'What is the main idea of "' + videoTitle + '", and how are the ideas organized?',
+            'What are the main challenges discussed, and how can we deal with them in our daily life?',
+            'Could you explain the main idea with one more example?',
+            'How can we apply these ideas in real situations?',
+            'Could you explain how to use these important expressions correctly?',
+            'What is the main idea, and how are the ideas organized?',
         ];
         const q = bank[Math.floor(Math.random() * bank.length)];
         return {
-            title: q,                                  // 标题 = 完整问题
+            title: q,                                  // 标题 = 问题本身
             content: q + '\n\nLooking forward to your answer. Thank you!',
         };
     }
