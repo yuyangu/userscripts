@@ -1,19 +1,53 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.13.1
+// @version      3.14.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
 // @match        https://*.zhihuishu.com/*
 // @grant        none
-// @run-at       document-idle
+// @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/yuyangu/userscripts/main/gxnufl-auto-next.user.js
 // @downloadURL  https://raw.githubusercontent.com/yuyangu/userscripts/main/gxnufl-auto-next.user.js
 // ==/UserScript==
 
 (function () {
     'use strict';
+
+    // 尽早挂钩子：捕获页面自己的"学习时长上报"请求参数（供后续判断能否免窗口上报）
+    (function hookStudyReport() {
+        try {
+            const XO = XMLHttpRequest.prototype.open;
+            const XS = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function (m, u) {
+                try { this.__gxUrl = String(u || ''); this.__gxMethod = m || 'GET'; } catch (e) {}
+                return XO.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.send = function (body) {
+                try {
+                    if (/StuStudy|saveStuStudy/i.test(this.__gxUrl || '')) {
+                        window.__gxStudyReq = { url: this.__gxUrl, method: this.__gxMethod, body: body, at: Date.now() };
+                        console.log('%c[GXNUFL刷课] 捕获学习上报请求', 'color:#2ecc71;font-weight:bold', this.__gxUrl, body);
+                    }
+                } catch (e) {}
+                return XS.apply(this, arguments);
+            };
+            if (window.fetch) {
+                const of = window.fetch;
+                window.fetch = function (input, init) {
+                    try {
+                        const u = (typeof input === 'string') ? input : ((input && input.url) || '');
+                        if (/StuStudy|saveStuStudy/i.test(u)) {
+                            window.__gxStudyReq = { url: u, method: (init && init.method) || 'GET', body: init && init.body, at: Date.now() };
+                            console.log('%c[GXNUFL刷课] 捕获学习上报请求(fetch)', 'color:#2ecc71;font-weight:bold', u, init && init.body);
+                        }
+                    } catch (e) {}
+                    return of.apply(this, arguments);
+                };
+            }
+        } catch (e) {}
+    })();
 
     // ===================== 默认设置（可在右下角面板实时修改） =====================
     const DEFAULTS = {
@@ -68,7 +102,8 @@
     }
 
     const log = (...a) => console.log('%c[GXNUFL刷课]', 'color:#2ecc71;font-weight:bold', ...a);
-    const jq = window.jQuery || window.$;
+    // document-start 时 jQuery 可能还没加载，start() 里会重新取
+    let jq = window.jQuery || window.$;
 
     // ===================== 随机延迟 =====================
     // 读取区间配置（秒）返回随机毫秒；上限 <=0 视为关闭（返回 0 不等待）
@@ -1205,13 +1240,47 @@
         return clickEl(el);
     }
 
+    // 按 fileId 直接切换（不需要 DOM 元素，折叠章节里的视频也能切）
+    function zhsSwitchById(id) {
+        if (!id) return false;
+        if (typeof window.changeFile === 'function') {
+            window.changeFile(String(id));
+            return true;
+        }
+        const el = document.getElementById('file_' + id);
+        if (el) return clickEl(el);
+        return false;
+    }
+
     // 当前页面的 courseId
     function zhsCourseId() {
         const m = location.search.match(/[?&]courseId=(\d+)/);
         return m ? m[1] : '';
     }
 
-    // 未完成、且不是当前播放的文件项（优先"已看了一部分"的，其次按进度从高到低）
+    // 【优先】从服务端资源树数据里选可播视频：不依赖 DOM，折叠章节里的视频也能选到
+    function zhsPendingIds() {
+        if (!zhsStat || !zhsStat.map) return [];
+        const curId = zhsCurrentFileId();
+        const list = [];
+        Object.keys(zhsStat.map).forEach(id => {
+            const it = zhsStat.map[id];
+            if (!it || !it.t) return;
+            if (id === curId) return;
+            if (it.done) return;                    // 服务端已完成
+            if (zhsIsDoneLocal(id)) return;         // 本地已记录完成
+            if (zhsIsRecentlyAssigned(id)) return;  // 近期已分配给其他窗口
+            list.push({ id: id, s: Number(it.s) || 0, t: it.t });
+        });
+        // 有进度的优先，进度大的优先（快完成的先刷完）
+        list.sort((a, b) => {
+            if ((a.s > 0) !== (b.s > 0)) return a.s > 0 ? -1 : 1;
+            return b.s - a.s;
+        });
+        return list;
+    }
+
+    // DOM 回退：接口数据不可用时按页面上的资源项选
     function zhsPendingFiles() {
         const curId = zhsCurrentFileId();
         const list = zhsFileItems().filter(el => {
@@ -1225,8 +1294,8 @@
             };
             list.sort((a, b) => {
                 const sa = getS(a), sb = getS(b);
-                if ((sa > 0) !== (sb > 0)) return sa > 0 ? -1 : 1;   // 有进度的排前面
-                return sb - sa;                                       // 进度大的优先（快完成的先刷完）
+                if ((sa > 0) !== (sb > 0)) return sa > 0 ? -1 : 1;
+                return sb - sa;
             });
         }
         return list;
@@ -1244,14 +1313,18 @@
     function openParallelWindows() {
         const cid = zhsCourseId();
         if (!cid) { setStatus('未取到 courseId，无法多开', 'warn'); return; }
-        const pend = zhsPendingFiles();
+        // 优先用服务端数据（覆盖折叠章节），接口不可用时回退 DOM
+        let pend = zhsPendingIds().map(x => x.id);
+        if (!pend.length) {
+            pend = zhsPendingFiles().map(el => (el.id || '').replace('file_', ''));
+        }
         if (!pend.length) { setStatus('没有待学习的资源了', 'ok'); return; }
         const total = Math.min(MULTI_COUNT, pend.length);
         const base = location.origin + location.pathname;
         const feat = state.MULTI_WIN ? 'popup=1,width=1100,height=700' : undefined;
         let opened = 0;
         for (let i = 0; i < total; i++) {
-            const id = (pend[i].id || '').replace('file_', '');
+            const id = pend[i];
             const url = base + '?courseId=' + cid + '&fileId=' + id + '&gxParallel=1';
             try {
                 const w = feat ? window.open(url, 'gxmulti_' + id, feat) : window.open(url, '_blank');
@@ -1288,9 +1361,18 @@
         nextTimer = setTimeout(() => {
             nextTimer = null;
             nextPendingAt = 0;
+            // 优先用服务端数据选（可覆盖折叠章节里的视频）；接口不可用时回退 DOM
+            const pend = zhsPendingIds();
+            if (pend.length) {
+                const id = pend[0].id;
+                log('本资源播完 → 切换下一个未完成资源:', id);
+                zhsMarkAssigned(id);   // 先占位，避免多个窗口抢同一个
+                zhsSwitchById(id);
+                return;
+            }
             const nf = zhsNextFile();
             if (nf) {
-                log('本资源播完 → 切换下一个未完成资源');
+                log('本资源播完 → 切换下一个未完成资源（DOM）');
                 zhsSwitchTo(nf);
             } else {
                 log('所有资源都已完成');
@@ -2018,7 +2100,14 @@
     }
 
     function start() {
-        log('脚本已启动 v3.10', state);
+        jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
+        log('脚本已启动 v3.14', state);
+        // 多开窗口：自动开启省流量模式（不下载/不解码视频，显著降低 CPU、内存与流量）
+        if (IS_ZHS && zhsIsParallelWindow() && !state.SAVE_DATA) {
+            state.SAVE_DATA = true;
+            saveState();
+            log('多开窗口：已自动开启省流量模式');
+        }
         buildUI();
         // 移除"浏览器版本过低"提示条（页面可能延迟插入，做几次补偿检查）
         removeBrowserTip();
