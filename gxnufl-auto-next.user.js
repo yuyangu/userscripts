@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.12.1
+// @version      3.13.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -955,6 +955,7 @@
     // ===================== 智慧树：右侧资源栏可拖拽调宽 =====================
     const ZHS_SIDEBAR_KEY = 'gxnufl_zhs_sidebar_w';
     const SIDEBAR_MIN = 240;
+    let currentSidebarW = 0;   // 用户设定的侧栏宽度（供收起态恢复用）
 
     function applySidebarWidth(w, persist) {
         const right = document.querySelector('.right');
@@ -962,6 +963,7 @@
         const max = Math.max(SIDEBAR_MIN + 60, Math.min(760, window.innerWidth - 480));
         w = Math.max(SIDEBAR_MIN, Math.min(Math.round(w), max));
         // 用 CSS 变量驱动（不写内联样式 → 页面自己的收起/全屏逻辑仍能覆盖）
+        currentSidebarW = w;
         document.documentElement.style.setProperty('--gx-sidebar-w', w + 'px');
         const h = document.getElementById('gxnufl-sidebar-handle');
         if (h) h.style.right = w + 'px';
@@ -1033,6 +1035,20 @@
         let saved = 0;
         try { saved = parseInt(localStorage.getItem(ZHS_SIDEBAR_KEY) || '0', 10); } catch (e) {}
         const nativeW = right.getBoundingClientRect().width || 304;
+
+        // 页面收起/展开侧栏靠改 .right 的 right 偏移（按原生 304px 计算）。
+        // 我们把侧栏加宽后，只偏移 304px 会露出一截 → 跟随页面的偏移量同步宽度，保证完全移出屏幕。
+        const mo = new MutationObserver(() => {
+            const off = parseFloat(right.style.right || '');
+            if (!isNaN(off) && off < 0) {
+                document.documentElement.style.setProperty('--gx-sidebar-w', Math.abs(off) + 'px');
+            } else {
+                const restore = currentSidebarW || nativeW;
+                document.documentElement.style.setProperty('--gx-sidebar-w', restore + 'px');
+            }
+        });
+        mo.observe(right, { attributes: true, attributeFilter: ['style'] });
+
         applySidebarWidth(saved || nativeW, false);
         sync();
     }
@@ -1242,15 +1258,19 @@
                 if (w) {
                     opened++;
                     zhsMarkAssigned(id);   // 记录已分配，防止二次点击重复开同一批
+                    if (!state.MULTI_WIN) {
+                        // 标签页模式：立刻让新标签页失焦（尽量不抢当前页）
+                        try { w.blur(); } catch (e) {}
+                    }
                 }
             } catch (e) {}
         }
         if (opened) {
-            // 标签页模式：立即把焦点切回当前页（相当于鼠标中键的后台打开，不跳走）
+            // 标签页模式：密集地把焦点切回当前页（等效鼠标中键后台打开）
             if (!state.MULTI_WIN) {
-                try { window.focus(); } catch (e) {}
-                setTimeout(() => { try { window.focus(); } catch (e) {} }, 120);
-                setTimeout(() => { try { window.focus(); } catch (e) {} }, 400);
+                [0, 30, 80, 150, 300, 600, 1000].forEach(t => {
+                    setTimeout(() => { try { window.focus(); } catch (e) {} }, t);
+                });
             }
             setStatus('已打开 ' + opened + ' 个' + (state.MULTI_WIN ? '独立窗口' : '后台标签页') + '（播完自动关闭）', 'ok');
             log('多开：', opened, '个');
@@ -1352,8 +1372,9 @@
                 // 多开窗口：播完自动关闭自己（避免多个窗口切到同一个资源）
                 if (zhsIsParallelWindow()) {
                     zhsMarkDoneLocal(zhsCurrentFileId());   // 记录已完成（主窗口资源树会同步 ✓）
-                    log('多开窗口：本资源播完，2 秒后自动关闭');
-                    setTimeout(() => { try { window.close(); } catch (e) {} }, 2000);
+                    // 不关闭窗口，继续播下一个未完成资源（相当于一个后台刷课进程）
+                    log('多开窗口：本资源播完 → 自动切换下一个');
+                    scheduleZhsNext();
                     return;
                 }
                 if (state.AUTO_NEXT) scheduleZhsNext();
