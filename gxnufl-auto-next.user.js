@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.12.0
+// @version      3.12.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -956,24 +956,37 @@
     const ZHS_SIDEBAR_KEY = 'gxnufl_zhs_sidebar_w';
     const SIDEBAR_MIN = 240;
 
-    function applySidebarWidth(w) {
+    function applySidebarWidth(w, persist) {
         const right = document.querySelector('.right');
-        const left = document.querySelector('.left');
         if (!right) return;
         const max = Math.max(SIDEBAR_MIN + 60, Math.min(760, window.innerWidth - 480));
         w = Math.max(SIDEBAR_MIN, Math.min(Math.round(w), max));
-        right.style.width = w + 'px';
-        if (left) left.style.right = w + 'px';
-        document.querySelectorAll('.file-item').forEach(el => { el.style.width = w + 'px'; });
+        // 用 CSS 变量驱动（不写内联样式 → 页面自己的收起/全屏逻辑仍能覆盖）
+        document.documentElement.style.setProperty('--gx-sidebar-w', w + 'px');
         const h = document.getElementById('gxnufl-sidebar-handle');
         if (h) h.style.right = w + 'px';
-        try { localStorage.setItem(ZHS_SIDEBAR_KEY, String(w)); } catch (e) {}
+        if (persist !== false) {
+            try { localStorage.setItem(ZHS_SIDEBAR_KEY, String(w)); } catch (e) {}
+        }
+    }
+
+    // 清理上一版留下的内联宽度（会把页面收起/全屏的样式顶掉）
+    function clearLegacyInlineWidths() {
+        const right = document.querySelector('.right');
+        const left = document.querySelector('.left');
+        if (right) right.style.width = '';
+        if (left) left.style.right = '';
+        document.querySelectorAll('.file-item, .folder-item .folder-box').forEach(el => { el.style.width = ''; });
+        const fb = document.querySelector('.right .fold-btn');
+        if (fb) fb.style.right = '';
     }
 
     function initSidebarResizer() {
         if (!IS_ZHS) return;
         const right = document.querySelector('.right');
         if (!right || document.getElementById('gxnufl-sidebar-handle')) return;
+
+        clearLegacyInlineWidths();
 
         const h = document.createElement('div');
         h.id = 'gxnufl-sidebar-handle';
@@ -1002,10 +1015,26 @@
             document.removeEventListener('mousemove', onMove);
         }
 
+        // 侧栏宽度变化（页面收起/展开、窗口缩放）→ 同步手柄位置；收起（过窄）时隐藏手柄
+        const sync = () => {
+            const w = right.getBoundingClientRect().width;
+            h.style.right = w + 'px';
+            h.style.display = w > 80 ? 'block' : 'none';
+        };
+        if (window.ResizeObserver) new ResizeObserver(sync).observe(right);
+        window.addEventListener('resize', sync);
+
+        // 播放器全屏时隐藏手柄（侧栏是否收起交给页面自身逻辑处理）
+        document.addEventListener('fullscreenchange', () => {
+            h.style.display = document.fullscreenElement ? 'none' : 'block';
+        });
+
         // 恢复上次宽度（无记录则保持页面原宽）
         let saved = 0;
         try { saved = parseInt(localStorage.getItem(ZHS_SIDEBAR_KEY) || '0', 10); } catch (e) {}
-        applySidebarWidth(saved || right.getBoundingClientRect().width || 304);
+        const nativeW = right.getBoundingClientRect().width || 304;
+        applySidebarWidth(saved || nativeW, false);
+        sync();
     }
 
     // ===================== 智慧树资源统计（总时长 / 已完成 / 剩余） =====================
@@ -1435,6 +1464,12 @@
 #gxnufl-panel .gx-info:hover + .gx-tip { display: block; }
 #gxnufl-pill { cursor: grab; }
 #gxnufl-pill:active { cursor: grabbing; }
+/* 资源栏宽度由 CSS 变量驱动（页面自己的内联样式仍可覆盖，保证收起/全屏正常） */
+.right { width: var(--gx-sidebar-w, 304px); }
+.left { right: var(--gx-sidebar-w, 304px); }
+.file-item { width: var(--gx-sidebar-w, 304px); }
+.folder-item .folder-box { width: var(--gx-sidebar-w, 304px); }
+.right .fold-btn { right: calc(var(--gx-sidebar-w, 304px) - 17px); }
 .file-item { position: relative; }
 .file-item .gx-dur {
     position: absolute; right: 44px; top: 50%; transform: translateY(-50%);
