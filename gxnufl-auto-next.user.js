@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.14.0
+// @version      3.14.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -1091,6 +1091,51 @@
     // ===================== 智慧树资源统计（总时长 / 已完成 / 剩余） =====================
     let zhsStat = null;    // { total, done, count, doneCount, map, fetchedAt }
     let elZhsStat = null;
+    let elReqCopy = null;  // "上报参数"状态行（点击复制，免开 F12）
+
+    // 复制捕获到的上报请求参数（避免用户开 F12 触发平台反调试）
+    function copyStudyReq() {
+        const req = window.__gxStudyReq;
+        if (!req) {
+            setStatus('还没捕获到上报请求，请正常播放任意视频 30 秒', 'warn');
+            return;
+        }
+        const text = 'URL: ' + req.url + '\nMethod: ' + req.method + '\nBody: ' + (req.body || '') + '\nAt: ' + new Date(req.at).toLocaleString();
+        const done = () => setStatus('已复制上报参数，可直接粘贴发给小布', 'ok');
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+                return;
+            }
+        } catch (e) {}
+        fallbackCopy(text, done);
+    }
+
+    function fallbackCopy(text, done) {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            done();
+        } catch (e) {
+            setStatus('复制失败，请手动查看 Console（不建议开 F12）', 'warn');
+        }
+    }
+
+    function renderReqCopy() {
+        if (!elReqCopy) return;
+        const has = !!window.__gxStudyReq;
+        const txt = has
+            ? '上报参数：✅ 已捕获（点击复制）'
+            : '上报参数：未捕获（正常播放 30 秒后自动捕获）';
+        if (elReqCopy.textContent !== txt) elReqCopy.textContent = txt;
+        elReqCopy.style.opacity = has ? '1' : '0.75';
+    }
 
     function fmtDuration(sec) {
         sec = Math.max(0, Math.round(sec));
@@ -1910,11 +1955,18 @@
         elStatus.className = 'gx-status';
         elStatus.textContent = '初始化中…';
 
-        // 智慧树：资源总时长统计块
+        // 智慧树：资源统计块 + 上报参数状态行
         if (IS_ZHS) {
             elZhsStat = document.createElement('div');
             elZhsStat.className = 'gx-stat';
             elZhsStat.textContent = '资源统计：加载中…';
+
+            elReqCopy = document.createElement('div');
+            elReqCopy.className = 'gx-stat';
+            elReqCopy.style.cursor = 'pointer';
+            elReqCopy.title = '智慧树有开发者工具检测（开 F12 会暂停播放并白屏）。点这里复制脚本捕获到的进度上报参数，无需开 F12';
+            elReqCopy.textContent = '上报参数：未捕获（正常播放 30 秒后自动捕获）';
+            elReqCopy.addEventListener('click', copyStudyReq);
         }
 
         const bodyBox = document.createElement('div');
@@ -2016,6 +2068,7 @@
         elPanel.appendChild(head);
         elPanel.appendChild(elStatus);
         if (elZhsStat) elPanel.appendChild(elZhsStat);
+        if (elReqCopy) elPanel.appendChild(elReqCopy);
         elPanel.appendChild(bodyBox);
         elPanel.appendChild(btnRow);
         elPanel.appendChild(foot);
@@ -2052,6 +2105,7 @@
             lastZhsSyncAt = Date.now();
             zhsSyncDoneToDom();
             zhsDecorateDurations();
+            renderReqCopy();
             // 页面渲染出侧栏后再初始化拖拽手柄
             if (!document.getElementById('gxnufl-sidebar-handle')) initSidebarResizer();
         }
