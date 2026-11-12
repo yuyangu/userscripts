@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.15.0
+// @version      3.15.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -1531,6 +1531,33 @@
         }
     }
 
+    // ===================== 后台保活（防浏览器休眠标签页） =====================
+    // Edge/Chrome 会休眠不活跃标签页（JS 定时器全部暂停）→ 多开的刷课窗口进度会中断。
+    // 通过持续输出极低音量的超声波，让页面保持"有声音"的活跃状态，从而不被判定为可休眠。
+    let keepAliveCtx = null;
+    function startKeepAlive() {
+        try {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) return false;
+            if (keepAliveCtx) {
+                if (keepAliveCtx.state === 'suspended') keepAliveCtx.resume().catch(() => {});
+                return true;
+            }
+            if (!document.body) return false;
+            keepAliveCtx = new AC();
+            const osc = keepAliveCtx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.value = 18000;   // 18kHz 超声波，人耳基本听不到
+            const gain = keepAliveCtx.createGain();
+            gain.gain.value = 0.005;       // 极低音量（非零，浏览器才判为"有声"）
+            osc.connect(gain);
+            gain.connect(keepAliveCtx.destination);
+            osc.start();
+            log('后台保活已启动（防标签页休眠）');
+            return true;
+        } catch (e) { keepAliveCtx = null; return false; }
+    }
+
     function ensurePlaying() {
         const v = getVideo();
         if (!v) return;
@@ -2199,7 +2226,7 @@
         if (!v) {
             setStatus('等待视频加载…', 'off');
         } else if (IS_ZHS) {
-            setStatus('智慧树模式 · 自动刷资源中', 'ok');
+            setStatus(document.hidden ? '智慧树模式 · 后台保活中' : '智慧树模式 · 自动刷资源中', 'ok');
         } else if (!state.AUTO_NEXT && !state.AUTO_ANSWER && !state.AUTO_PLAY) {
             setStatus('全部功能已关闭', 'off');
         } else {
@@ -2217,6 +2244,11 @@
             log('多开窗口：已自动开启省流量模式');
         }
         buildUI();
+        // 后台保活：先试一次；若被浏览器自动播放策略拦下，等用户第一次点击/按键时再启动
+        startKeepAlive();
+        const keepKick = () => { startKeepAlive(); };
+        document.addEventListener('click', keepKick, { once: true });
+        document.addEventListener('keydown', keepKick, { once: true });
         // 移除"浏览器版本过低"提示条（页面可能延迟插入，做几次补偿检查）
         removeBrowserTip();
         setTimeout(removeBrowserTip, 1200);
