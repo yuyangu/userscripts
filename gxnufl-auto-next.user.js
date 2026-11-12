@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.4.0
-// @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速，确保题目正常弹出；随机延迟范围与各开关均可在右下角面板调节
+// @version      3.5.0
+// @description  广西师大漓江学院(elearnmooc)在线课程：视频播完自动点"下一节"；弹题自动处理（跳过/字幕匹配/答错纠错）；播放倍速可自定义（最高 16x），高倍速下接近题目点自动临时降速；支持按视频标题自动生成提问并提交（每节可选一次）；各开关与随机延迟均在右下角面板调节
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
 // @grant        none
@@ -23,6 +23,7 @@
         MUTE: false,            // 静音
         SPEED: 0,               // 播放倍速：0=不干预；支持自定义输入（最高 16）
         GUARD: true,            // 弹题保护：高倍速时接近题目点自动临时降至 1x，确保题目弹出
+        AUTO_ASK: false,        // 自动提问：每节视频自动生成一个问题并提交一次
         DELAY_ANSWER_MIN: 2,    // 答题延迟下限（秒）
         DELAY_ANSWER_MAX: 8,    // 答题延迟上限（秒）—— 0~0 表示关闭
         DELAY_NEXT_MIN: 1,      // 下一节延迟下限（秒）
@@ -34,8 +35,10 @@
         SHORT_MIN: 500,         // 短延迟区间（提交/关闭提示）：0.5~2 秒
         SHORT_MAX: 2000,
         NEXT_FLOOR: 500,        // "下一节"最小保底延迟，防止操作竞态
+        ASK_READY_AT: 3000,     // 页面加载后至少等 3 秒再自动提问（等页面初始化）
     };
-    // 注：倍速已改为面板自由输入（0~16，0=不干预）
+    const ASK_RECORD_KEY = 'gxnufl_asked_sections';   // 已自动提问过的小节记录
+    const START_AT = Date.now();
 
     // ===================== 设置持久化（localStorage） =====================
     const STORAGE_KEY = 'gxnufl_auto_settings_v3';
@@ -87,6 +90,7 @@
     let nextPendingAt = 0;       // "下一节"等待中的时间点（用于状态显示）
     let lastStatusText = '';
     let lastStatusLevel = '';
+    let askInFlight = false;     // 自动提问进行中标记
 
     // ===================== 工具函数 =====================
     function isVisible(el) {
@@ -486,6 +490,125 @@
         return false;
     }
 
+    // ===================== 自动提问（按视频标题生成问题并提交） =====================
+    // 页面结构：.question_student_title（标题）/ .question_textarea（内容）/ .save_question（提交）
+    // 提交接口：/multilingual/insertDiscussPost（由页面自身处理，脚本只负责填值+点按钮）
+
+    // 读取视频标题（优先 title 属性）
+    function getVideoTitle() {
+        const el = document.querySelector('.video_name');
+        if (!el) return '';
+        return (el.getAttribute('title') || el.innerText || '').trim();
+    }
+
+    // 根据视频标题生成一个问题（标题 + 内容），从模板随机选一个
+    function genQuestion() {
+        let videoTitle = getVideoTitle() || 'this video';
+        // 去掉开头的章节序号（如 "3.2 "、"Unit 3 "），保留主题
+        let topic = videoTitle.replace(/^\s*(?:unit\s*\d+[\s.:・-]*)?(?:[\d.]+\s*)?/i, '').trim();
+        if (!topic) topic = videoTitle;
+
+        const bank = [
+            {
+                title: 'A question about "' + topic + '"',
+                content: 'In the video "' + videoTitle + '", what are the main challenges mentioned, and how can we deal with them in our daily life?',
+            },
+            {
+                title: 'About the key points of "' + topic + '"',
+                content: 'After watching "' + videoTitle + '", I am still a little confused about the key points. Could you explain the main idea of this part with one more example?',
+            },
+            {
+                title: 'How can we apply "' + topic + '" in practice?',
+                content: 'The video "' + videoTitle + '" gives some useful ideas. I wonder how we can put them into practice in real situations. Could you give some suggestions?',
+            },
+            {
+                title: 'A question on the expressions in "' + topic + '"',
+                content: 'In "' + videoTitle + '", there are several important expressions. Could you help me understand how to use them correctly in speaking and writing?',
+            },
+            {
+                title: 'What is the main idea of "' + topic + '"?',
+                content: 'I would like to ask about the structure of "' + videoTitle + '". What is the main idea of this section, and how are the ideas organized?',
+            },
+        ];
+        return bank[Math.floor(Math.random() * bank.length)];
+    }
+
+    // 关闭匹配关键词的 alertBox 提示（页面自定义弹窗）
+    function closeAlertIfMatch(keyword) {
+        const boxes = document.querySelectorAll('.alertbox');
+        boxes.forEach(box => {
+            const msg = box.querySelector('.alertbox_message');
+            if (msg && msg.innerText.indexOf(keyword) !== -1) {
+                const btn = box.querySelector('.alertbox_group button')
+                    || box.querySelector('.alertbox_group input')
+                    || box.querySelector('.alertbox_group a');
+                if (btn) clickEl(btn);
+            }
+        });
+    }
+
+    // 填写并提交一个问题；返回是否成功触发
+    function submitQuestion() {
+        const titleEl = document.querySelector('.question_student_title');
+        const contentEl = document.querySelector('.question_textarea');
+        if (!titleEl || !contentEl) {
+            setStatus('未找到提问输入框（当前页面可能不支持提问）', 'warn');
+            return false;
+        }
+        // 切到"提问"标签页（保证输入区可见、状态正确）
+        const tab = document.querySelector('.note_title .student_question');
+        if (tab && !tab.classList.contains('active')) clickEl(tab);
+
+        const q = genQuestion();
+        fillText(titleEl, q.title);
+        fillText(contentEl, q.content);
+        log('生成提问：', q.title);
+        setStatus('已生成提问，正在提交…', 'busy');
+
+        // 稍等片刻（等 tab 切换/赋值完成）再点提交
+        setTimeout(() => {
+            const btn = document.querySelector('.save_question');
+            if (btn) clickEl(btn);
+            // 自动关闭"保存提问成功"提示
+            setTimeout(() => {
+                closeAlertIfMatch('保存提问成功');
+                closeAlertIfMatch('保存提问失败');
+            }, 1200);
+        }, 400);
+        return true;
+    }
+
+    // 取当前小节标识（subsectionId 优先）
+    function getSectionKey() {
+        const m = location.search.match(/subsectionId=(\d+)/);
+        if (m) return m[1];
+        const t = getVideoTitle();
+        return t || location.pathname;
+    }
+
+    // 自动提问主检查（每节只问一次，记录在 localStorage）
+    function autoAskTick() {
+        if (!state.AUTO_ASK || askInFlight) return;
+        if (Date.now() - START_AT < FIXED.ASK_READY_AT) return;   // 等页面初始化
+        const v = getVideo();
+        if (!v || v.readyState < 1) return;                       // 等视频元数据
+
+        const key = getSectionKey();
+        if (!key) return;
+        let asked = {};
+        try { asked = JSON.parse(localStorage.getItem(ASK_RECORD_KEY) || '{}'); } catch (e) {}
+        if (asked[key]) return;
+
+        askInFlight = true;
+        const ok = submitQuestion();
+        if (ok) {
+            asked[key] = Date.now();
+            try { localStorage.setItem(ASK_RECORD_KEY, JSON.stringify(asked)); } catch (e) {}
+            log('本节自动提问完成，已记录', key);
+        }
+        askInFlight = false;
+    }
+
     // ===================== 下一节 & 自动播放 =====================
     let nextTimer = null;
     function scheduleNext() {
@@ -579,12 +702,6 @@
     border-radius: 50%; background: #ffffff; transition: left 0.15s;
 }
 #gxnufl-panel .gx-switch.on .gx-knob { left: 18px; }
-#gxnufl-panel select {
-    background: rgba(255,255,255,0.1); color: #e8eaed;
-    border: 1px solid rgba(255,255,255,0.22); border-radius: 6px;
-    padding: 2px 4px; font-size: 11px; outline: none; cursor: pointer;
-}
-#gxnufl-panel select option { background: #17191b; color: #e8eaed; }
 #gxnufl-panel .gx-range { display: flex; align-items: center; gap: 3px; color: #cfd3d6; font-size: 11px; }
 #gxnufl-panel .gx-num {
     width: 36px; text-align: center;
@@ -596,13 +713,21 @@
 #gxnufl-panel .gx-num::-webkit-outer-spin-button,
 #gxnufl-panel .gx-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 #gxnufl-panel .gx-num:focus { border-color: rgba(46,204,113,0.65); }
+#gxnufl-panel .gx-btn-row { display: flex; gap: 6px; margin-top: 9px; }
 #gxnufl-panel .gx-jump {
-    width: 100%; margin-top: 9px; padding: 7px 0;
+    flex: 1 1 0; padding: 7px 0;
     background: rgba(46,204,113,0.16); color: #7ee2a8;
     border: 1px solid rgba(46,204,113,0.4); border-radius: 8px;
     cursor: pointer; font-size: 12px; font-family: inherit;
 }
 #gxnufl-panel .gx-jump:hover { background: rgba(46,204,113,0.3); color: #a5f0c4; }
+#gxnufl-panel .gx-ask {
+    flex: 1 1 0; padding: 7px 0;
+    background: rgba(79,142,247,0.16); color: #9cc0ff;
+    border: 1px solid rgba(79,142,247,0.42); border-radius: 8px;
+    cursor: pointer; font-size: 12px; font-family: inherit;
+}
+#gxnufl-panel .gx-ask:hover { background: rgba(79,142,247,0.3); color: #c3d8ff; }
 #gxnufl-panel .gx-foot { margin-top: 7px; font-size: 10.5px; color: #8a8f98; text-align: center; }
         `;
         const style = document.createElement('style');
@@ -636,23 +761,6 @@
         r.appendChild(l);
         r.appendChild(node);
         return r;
-    }
-
-    function makeSelect(key, options, transform) {
-        const sel = document.createElement('select');
-        options.forEach(([v, t]) => {
-            const o = document.createElement('option');
-            o.value = v;
-            o.textContent = t;
-            sel.appendChild(o);
-        });
-        sel.value = String(state[key]);
-        sel.addEventListener('change', () => {
-            state[key] = transform ? transform(sel.value) : sel.value;
-            saveState();
-            log(key, '=', state[key]);
-        });
-        return sel;
     }
 
     // 倍速自定义输入（0 = 不干预；0.25 步进，最高 16）
@@ -804,8 +912,13 @@
         bodyBox.appendChild(makeRow('静音', makeSwitch('MUTE')));
         bodyBox.appendChild(makeRow('播放倍速', makeSpeedInput()));
         bodyBox.appendChild(makeRow('弹题保护', makeSwitch('GUARD')));
+        bodyBox.appendChild(makeRow('自动提问', makeSwitch('AUTO_ASK')));
         bodyBox.appendChild(makeRow('答题延迟', makeDelayInputs('DELAY_ANSWER_MIN', 'DELAY_ANSWER_MAX')));
         bodyBox.appendChild(makeRow('下一节延迟', makeDelayInputs('DELAY_NEXT_MIN', 'DELAY_NEXT_MAX')));
+
+        // 按钮区：跳转下一节 + 立即提问
+        const btnRow = document.createElement('div');
+        btnRow.className = 'gx-btn-row';
 
         const jump = document.createElement('button');
         jump.className = 'gx-jump';
@@ -820,14 +933,26 @@
             }
         });
 
+        const ask = document.createElement('button');
+        ask.className = 'gx-ask';
+        ask.textContent = '立即提问';
+        ask.title = '根据视频标题生成一个问题并提交';
+        ask.addEventListener('click', () => {
+            // 手动提问：不受"本节已提问"记录限制
+            submitQuestion();
+        });
+
+        btnRow.appendChild(jump);
+        btnRow.appendChild(ask);
+
         const foot = document.createElement('div');
         foot.className = 'gx-foot';
-        foot.textContent = '延迟 0~0 = 关闭；倍速 0 = 不干预，高速时题目点自动降速';
+        foot.textContent = '延迟 0~0=关闭；倍速 0=不干预；自动提问默认关';
 
         elPanel.appendChild(head);
         elPanel.appendChild(elStatus);
         elPanel.appendChild(bodyBox);
-        elPanel.appendChild(jump);
+        elPanel.appendChild(btnRow);
         elPanel.appendChild(foot);
         document.body.appendChild(elPanel);
 
@@ -856,6 +981,7 @@
         bindVideo();
         const handled = handleQuestion();
         ensurePlaying();
+        autoAskTick();
 
         if (handled) {
             setStatus(handled.text, handled.level);
@@ -891,7 +1017,7 @@
     }
 
     function start() {
-        log('脚本已启动 v3.4', state);
+        log('脚本已启动 v3.5', state);
         buildUI();
         setInterval(tick, FIXED.POLL_MS);
         // 倍速管理用更高频检查（100ms），保证高倍速下能及时在题目点减速
