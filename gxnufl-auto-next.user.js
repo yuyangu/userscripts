@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.11.0
+// @version      3.11.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -860,7 +860,9 @@
     function zhsMarkAssigned(id) {
         if (!id) return;
         const m = readJsonMap(ZHS_ASSIGN_KEY);
-        m[id] = Date.now();
+        let dur = 0;
+        if (zhsStat && zhsStat.map && zhsStat.map[id]) dur = Number(zhsStat.map[id].t) || 0;
+        m[id] = { at: Date.now(), dur: dur };
         writeJsonMap(ZHS_ASSIGN_KEY, m);
     }
     function zhsMarkDoneLocal(id) {
@@ -869,10 +871,20 @@
         m[id] = Date.now();
         writeJsonMap(ZHS_DONE_KEY, m);
     }
+    function zhsAssignedInfo(id) {
+        const v = readJsonMap(ZHS_ASSIGN_KEY)[id];
+        if (!v) return null;
+        if (typeof v === 'number') return { at: v, dur: 0 };   // 兼容旧格式
+        return { at: Number(v.at) || 0, dur: Number(v.dur) || 0 };
+    }
+    // "已分配"有效期 = 该视频时长 + 10 分钟缓冲：
+    // 窗口正常播完即过期；用户手动关窗后也能较快释放，避免一直跳过未看过的视频
     function zhsIsRecentlyAssigned(id) {
         if (!id) return false;
-        const t = readJsonMap(ZHS_ASSIGN_KEY)[id];
-        return !!t && (Date.now() - t) < 2 * 3600 * 1000;   // 2 小时内视为"正在多开"
+        const info = zhsAssignedInfo(id);
+        if (!info || !info.at) return false;
+        const winMs = (info.dur > 0 ? info.dur + 600 : 2 * 3600) * 1000;
+        return (Date.now() - info.at) < winMs;
     }
     function zhsIsDoneLocal(id) {
         return !!(id && readJsonMap(ZHS_DONE_KEY)[id]);
@@ -978,23 +990,54 @@
         if (!IS_ZHS) return;
         const cid = zhsCourseId();
         if (!cid) return;
-        const url = '//studyResources.zhihuishu.com/studyResources/stuResouce/queryResourceMenuTree';
+        const base = '//studyResources.zhihuishu.com/studyResources/stuResouce/';
+        // 资料学习页用 queryResourceMenuTree；学习资源页（新版）用 queryResourceTree
+        const urls = [base + 'queryResourceMenuTree', base + 'queryResourceTree'];
+        let i = 0;
+
+        const takeList = (res) => {
+            let v = res && (res.rt !== undefined ? res.rt : res.data);
+            if (v && !Array.isArray(v)) v = v.tree || v.list || v.childList || v.resourceTree;
+            return Array.isArray(v) ? v : null;
+        };
+
         const handle = (res) => {
-            const list = (res && (res.rt || res)) || [];
-            if (!Array.isArray(list)) return;
+            const list = takeList(res);
+            if (!list) return false;
             zhsStat = computeZhsStat(list);
             renderZhsStat();
             zhsDecorateDurations();
             log('资源统计：', zhsStat.total, '秒 /', zhsStat.count, '个 / 已完成', zhsStat.doneCount);
+            return true;
         };
-        // 优先复用页面的 server 对象（跨域方式与站点一致）
-        if (window.server && typeof window.server.get === 'function') {
-            try { window.server.get(url, { courseId: cid }, handle); return; } catch (e) {}
-        }
-        // 回退：jQuery JSONP
-        if (jq && jq.getJSON) {
-            try { jq.getJSON(url + '?courseId=' + cid + '&callback=?', handle); return; } catch (e) {}
-        }
+
+        const tryOne = () => {
+            if (i >= urls.length) { log('资源统计：接口均未取到数据'); return; }
+            const url = urls[i++];
+            // 1) 页面自带 server 对象（资料页可用）
+            if (window.server && typeof window.server.get === 'function') {
+                try {
+                    window.server.get(url, { courseId: cid }, (res) => { if (!handle(res)) tryOne(); });
+                    // 兜底：8 秒后仍无数据则试下一个接口
+                    setTimeout(() => { if (!zhsStat) tryOne(); }, 8000);
+                    return;
+                } catch (e) {}
+            }
+            // 2) jQuery JSONP（带超时，失败自动换下一个接口）
+            if (jq && jq.ajax) {
+                jq.ajax({
+                    url: url,
+                    data: { courseId: cid },
+                    dataType: 'jsonp',
+                    timeout: 6000,
+                    success: (res) => { if (!handle(res)) tryOne(); },
+                    error: () => tryOne(),
+                });
+                return;
+            }
+            tryOne();
+        };
+        tryOne();
     }
 
     function renderZhsStat() {
@@ -1118,7 +1161,13 @@
             } catch (e) {}
         }
         if (opened) {
-            setStatus('已打开 ' + opened + ' 个' + (state.MULTI_WIN ? '独立窗口' : '标签页') + '（播完自动关闭）', 'ok');
+            // 标签页模式：立即把焦点切回当前页（相当于鼠标中键的后台打开，不跳走）
+            if (!state.MULTI_WIN) {
+                try { window.focus(); } catch (e) {}
+                setTimeout(() => { try { window.focus(); } catch (e) {} }, 120);
+                setTimeout(() => { try { window.focus(); } catch (e) {} }, 400);
+            }
+            setStatus('已打开 ' + opened + ' 个' + (state.MULTI_WIN ? '独立窗口' : '后台标签页') + '（播完自动关闭）', 'ok');
             log('多开：', opened, '个');
         } else {
             setStatus('窗口被浏览器拦截，请允许本页弹出窗口', 'warn');
@@ -1330,10 +1379,11 @@
 #gxnufl-panel .gx-info:hover + .gx-tip { display: block; }
 #gxnufl-pill { cursor: grab; }
 #gxnufl-pill:active { cursor: grabbing; }
+.file-item { position: relative; }
 .file-item .gx-dur {
-    display: inline-block; margin-left: 6px;
+    position: absolute; right: 44px; top: 50%; transform: translateY(-50%);
     font-size: 11px; color: #9aa0a6; font-family: Consolas, "Microsoft YaHei", monospace;
-    white-space: nowrap;
+    white-space: nowrap; pointer-events: none;
 }
 #gxnufl-panel .gx-stat {
     margin: 0 0 8px; padding: 5px 8px; border-radius: 6px;
