@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.7
+// @version      3.16.8
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -133,7 +133,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.16.7',
+                '脚本版本: 3.16.8',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1343,6 +1343,64 @@
         fetchZhsStats();
     }
 
+    // 多开窗口：把右侧资源树自动滚动到"当前播放的视频"位置（并展开所在文件夹）
+    function zhsScrollToCurrent() {
+        if (!IS_ZHS) return false;
+        const fid = zhsCurrentFileId();
+        if (!fid) return false;
+        let el = document.getElementById('file_' + fid);
+        if (!el) return false;
+
+        // 先展开所有折叠的祖先文件夹（折叠状态下子项不可见，无法滚动）
+        let node = el.parentElement;
+        let guard = 0;
+        while (node && guard++ < 12) {
+            if (node.classList && node.classList.contains('folder-item')) {
+                const id = (node.id || '').replace('folder_', '');
+                const box = node.querySelector(':scope > .folder-box');
+                const child = node.querySelector(':scope > .folder-child');
+                const collapsed = child && getComputedStyle(child).display === 'none';
+                if (collapsed && id) {
+                    if (typeof window.stretchFolder === 'function') {
+                        try { window.stretchFolder(id); } catch (e) {}
+                    } else if (box) {
+                        clickEl(box);
+                    }
+                }
+            }
+            node = node.parentElement;
+        }
+
+        // 展开后需要一点时间布局，再滚动
+        setTimeout(() => {
+            try {
+                const cur = document.getElementById('file_' + fid);
+                if (!cur) return;
+                if (jq && jq.fn && jq.fn.nanoScroller) {
+                    jq('.source-list.nano').nanoScroller({ scrollTo: jq(cur) });
+                    return;
+                }
+                cur.scrollIntoView({ block: 'center' });
+            } catch (e) {}
+        }, 350);
+        return true;
+    }
+
+    // 轮询等待列表渲染完成后再滚动（最多等 12 秒）
+    function zhsScrollToCurrentWhenReady() {
+        if (!IS_ZHS) return;
+        const deadline = Date.now() + 12000;
+        const tickWait = () => {
+            const fid = zhsCurrentFileId();
+            if (fid && document.getElementById('file_' + fid)) {
+                zhsScrollToCurrent();
+                return;
+            }
+            if (Date.now() < deadline) setTimeout(tickWait, 500);
+        };
+        tickWait();
+    }
+
     function zhsCurrentFileId() {
         const m = location.search.match(/[?&]fileId=(\d+)/);
         return m ? m[1] : '';
@@ -2390,6 +2448,8 @@
             if (/^wenda\./i.test(location.hostname)) document.body.classList.add('gx-zhs-source');
             setTimeout(fetchZhsStats, 2000);
             setTimeout(clearFalseLocalDone, 3500);   // 清理旧版本误标的完成记录
+            // 多开窗口：自动把右侧列表滚到当前播放的视频位置
+            if (zhsIsParallelWindow()) setTimeout(zhsScrollToCurrentWhenReady, 1500);
         }
         setInterval(tick, FIXED.POLL_MS);
         // 倍速管理用更高频检查（100ms），保证高倍速下能及时在题目点减速
