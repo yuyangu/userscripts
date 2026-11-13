@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.23.0
+// @version      3.24.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -414,13 +414,86 @@
         const doneBtn = mkBtn('完成', 'primary');
         [refreshBtn, exportBtn, clearBtn, doneBtn].forEach(b => foot.appendChild(b));
         dlg.appendChild(foot);
+        const resizeHandle = document.createElement('div');
+        resizeHandle.className = 'gxl-resize';
+        resizeHandle.title = '拖动调整窗口大小';
+        dlg.appendChild(resizeHandle);
         ov.appendChild(dlg);
         document.body.appendChild(ov);
+
+        // ---- 位置 / 尺寸：记忆 + 标题栏拖拽 + 右下角缩放 ----
+        const DLG_RECT_KEY = 'gxnufl_logdlg_rect';
+        const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+        const readRect = () => {
+            try { return JSON.parse(localStorage.getItem(DLG_RECT_KEY) || 'null'); } catch (e) { return null; }
+        };
+        const saveRect = () => {
+            try {
+                localStorage.setItem(DLG_RECT_KEY, JSON.stringify({
+                    left: dlg.offsetLeft, top: dlg.offsetTop,
+                    width: dlg.offsetWidth, height: dlg.offsetHeight
+                }));
+            } catch (e) {}
+        };
+        const vw = () => window.innerWidth, vh = () => window.innerHeight;
+        const minW = 330, minH = 280;
+        const r = readRect();
+        const w0 = clamp(r && Number(r.width) ? Number(r.width) : 440, minW, Math.max(minW, vw() - 16));
+        const h0 = clamp(r && Number(r.height) ? Number(r.height) : 520, minH, Math.max(minH, vh() - 16));
+        dlg.style.width = w0 + 'px';
+        dlg.style.height = h0 + 'px';
+        dlg.style.left = clamp(r && Number.isFinite(r.left) ? r.left : (vw() - w0) / 2, 0, Math.max(0, vw() - w0 - 4)) + 'px';
+        dlg.style.top = clamp(r && Number.isFinite(r.top) ? r.top : (vh() - h0) / 2, 0, Math.max(0, vh() - h0 - 4)) + 'px';
+
+        // 标题栏拖拽（点关闭按钮时不触发）
+        head.addEventListener('mousedown', (e) => {
+            if (e.button !== 0 || (e.target && e.target.classList && e.target.classList.contains('gxl-close'))) return;
+            const sx = e.clientX, sy = e.clientY;
+            const ol = dlg.offsetLeft, ot = dlg.offsetTop;
+            const onMove = (ev) => {
+                dlg.style.left = clamp(ol + ev.clientX - sx, 0, Math.max(0, vw() - dlg.offsetWidth - 4)) + 'px';
+                dlg.style.top = clamp(ot + ev.clientY - sy, 0, Math.max(0, vh() - dlg.offsetHeight - 4)) + 'px';
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                saveRect();
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp, { once: true });
+            e.preventDefault();
+        });
+
+        // 右下角缩放
+        resizeHandle.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            const sx = e.clientX, sy = e.clientY;
+            const ow = dlg.offsetWidth, oh = dlg.offsetHeight;
+            const ol = dlg.offsetLeft, ot = dlg.offsetTop;
+            const onMove = (ev) => {
+                dlg.style.width = clamp(ow + ev.clientX - sx, minW, Math.max(minW, vw() - ol - 4)) + 'px';
+                dlg.style.height = clamp(oh + ev.clientY - sy, minH, Math.max(minH, vh() - ot - 4)) + 'px';
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                saveRect();
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp, { once: true });
+            e.preventDefault();
+        });
+        // 视口变化时保证弹窗不被挤出屏幕
+        const onWinResize = () => {
+            dlg.style.left = clamp(dlg.offsetLeft, 0, Math.max(0, vw() - dlg.offsetWidth - 4)) + 'px';
+            dlg.style.top = clamp(dlg.offsetTop, 0, Math.max(0, vh() - dlg.offsetHeight - 4)) + 'px';
+        };
+        window.addEventListener('resize', onWinResize);
 
         const onEsc = (e) => { if (e.key === 'Escape') close(); };
         const close = () => {
             if (logDlgTimer) { clearInterval(logDlgTimer); logDlgTimer = null; }
             document.removeEventListener('keydown', onEsc);
+            window.removeEventListener('resize', onWinResize);
+            saveRect();
             try { ov.remove(); } catch (e) {}
         };
         head.querySelector('.gxl-close').addEventListener('click', close);
@@ -482,7 +555,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.23.0',
+                '脚本版本: 3.24.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -2368,11 +2441,11 @@
 #gxnufl-logdlg-overlay {
     position: fixed; inset: 0; z-index: 2147483646;
     background: rgba(0,0,0,0.62);
-    display: flex; align-items: center; justify-content: center;
 }
 #gxnufl-logdlg, #gxnufl-logdlg * { box-sizing: border-box; font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; }
 #gxnufl-logdlg {
-    width: 440px; max-width: 92vw; max-height: 86vh;
+    position: absolute;
+    width: 440px; height: 520px; min-width: 330px; min-height: 280px;
     background: rgba(26,28,32,0.98); color: #e8eaed; font-size: 12px;
     border: 1px solid rgba(255,255,255,0.16); border-radius: 12px;
     box-shadow: 0 12px 40px rgba(0,0,0,0.6);
@@ -2382,10 +2455,12 @@
     display: flex; justify-content: space-between; align-items: center;
     padding: 11px 14px; font-weight: 600; font-size: 13px;
     border-bottom: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.04);
+    cursor: move; user-select: none; flex: 0 0 auto;
 }
 #gxnufl-logdlg .gxl-close { cursor: pointer; color: #9aa0a6; font-size: 18px; line-height: 1; padding: 0 4px; }
 #gxnufl-logdlg .gxl-close:hover { color: #fff; }
-#gxnufl-logdlg .gxl-body { padding: 10px 14px; overflow: auto; }
+#gxnufl-logdlg .gxl-body { padding: 10px 14px; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+#gxnufl-logdlg .gxl-body > * { flex: 0 0 auto; }
 #gxnufl-logdlg .gxl-sec { color: #9cc0ff; font-weight: 600; font-size: 11.5px; margin: 6px 0 8px; }
 #gxnufl-logdlg .gxl-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
 #gxnufl-logdlg .gxl-row label { color: #d6d9dc; }
@@ -2402,12 +2477,22 @@
     background: rgba(79,142,247,0.12); color: #cfd3d6; font-size: 10.5px; line-height: 1.5;
 }
 #gxnufl-logdlg .gxl-preview {
-    height: 190px; overflow: auto; padding: 8px; border-radius: 7px;
+    flex: 1; min-height: 90px; overflow: auto; padding: 8px; border-radius: 7px;
     background: rgba(0,0,0,0.32); border: 1px solid rgba(255,255,255,0.1);
     color: #b8bec7; font: 10.5px/1.7 Consolas, "Microsoft YaHei", monospace;
     white-space: pre-wrap; word-break: break-all;
 }
 #gxnufl-logdlg .gxl-foot { display: flex; gap: 6px; padding: 10px 14px; border-top: 1px solid rgba(255,255,255,0.1); }
+#gxnufl-logdlg .gxl-foot { flex: 0 0 auto; }
+#gxnufl-logdlg .gxl-resize {
+    position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+    cursor: nwse-resize; z-index: 2;
+}
+#gxnufl-logdlg .gxl-resize::after {
+    content: ''; position: absolute; right: 3px; bottom: 3px; width: 8px; height: 8px;
+    border-right: 2px solid rgba(156,192,255,0.7); border-bottom: 2px solid rgba(156,192,255,0.7);
+}
+#gxnufl-logdlg .gxl-resize:hover::after { border-color: #9cc0ff; }
 #gxnufl-logdlg .gxl-btn {
     flex: 1; padding: 6px 4px; border-radius: 7px; cursor: pointer;
     background: rgba(255,255,255,0.07); color: #d6d9dc;
@@ -2972,7 +3057,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.23', state);
+        log('脚本已启动 v3.24', state);
         // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
         if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
             state.SAVE_DATA = false;
