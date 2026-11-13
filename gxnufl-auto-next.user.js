@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.9
+// @version      3.17.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -15,13 +15,49 @@
 (function () {
     'use strict';
 
-    // 尽早挂钩子：捕获页面自己的"学习时长上报"请求参数（供后续判断能否免窗口上报）
+    // ===== 网络请求记录（排查掉登录/风控用：只记关键接口，响应截断） =====
+    const NET_MAX = 100;
+    const netLog = [];
+    const NET_PATTERN = /stuStudy|studyResources|userInfo|isLogin|login|logout|session|auth|token|hike-teaching|zhsuser/i;
+
+    function formatNet(status, method, url, resp) {
+        let u = String(url || '');
+        u = u.replace(/signature=[^&]*/i, 'signature=***').replace(/([?&])_=\d+/g, '$1_=***');
+        const r = String(resp || '').replace(/\s+/g, ' ').slice(0, 260);
+        return new Date().toLocaleTimeString() + '  [' + status + '] ' + (method || '') + ' ' + u + (r ? '  →  ' + r : '');
+    }
+
+    function recordNet(line) {
+        try {
+            if (!line) return;
+            netLog.push(line);
+            if (netLog.length > NET_MAX) netLog.shift();
+        } catch (e) {}
+    }
+
+    // 尽早挂钩子：捕获学习上报参数 + 记录关键接口的请求/响应
     (function hookStudyReport() {
         try {
             const XO = XMLHttpRequest.prototype.open;
             const XS = XMLHttpRequest.prototype.send;
             XMLHttpRequest.prototype.open = function (m, u) {
-                try { this.__gxUrl = String(u || ''); this.__gxMethod = m || 'GET'; } catch (e) {}
+                try {
+                    this.__gxUrl = String(u || '');
+                    this.__gxMethod = m || 'GET';
+                    if (!this.__gxNetHooked) {
+                        this.__gxNetHooked = true;
+                        this.addEventListener('load', function () {
+                            try {
+                                if (!NET_PATTERN.test(this.__gxUrl || '')) return;
+                                let body = '';
+                                try {
+                                    if (!this.responseType || this.responseType === 'text') body = this.responseText || '';
+                                } catch (e) {}
+                                recordNet(formatNet(this.status, this.__gxMethod, this.__gxUrl, body));
+                            } catch (e) {}
+                        });
+                    }
+                } catch (e) {}
                 return XO.apply(this, arguments);
             };
             XMLHttpRequest.prototype.send = function (body) {
@@ -41,14 +77,26 @@
             if (window.fetch) {
                 const of = window.fetch;
                 window.fetch = function (input, init) {
+                    const u = (typeof input === 'string') ? input : ((input && input.url) || '');
+                    const method = (init && init.method) || 'GET';
+                    const p = of.apply(this, arguments);
                     try {
-                        const u = (typeof input === 'string') ? input : ((input && input.url) || '');
                         if (/StuStudy|saveStuStudy/i.test(u)) {
-                            window.__gxStudyReq = { url: u, method: (init && init.method) || 'GET', body: init && init.body, at: Date.now() };
-                            console.log('%c[GXNUFL刷课] 捕获学习上报请求(fetch)', 'color:#2ecc71;font-weight:bold', u, init && init.body);
+                            window.__gxStudyReq = { url: u, method: method, body: init && init.body, at: Date.now() };
+                            window.__gxReportAt = Date.now();
+                            (window.__gxHookLog = window.__gxHookLog || []).push(
+                                '捕获上报: ' + String(u).replace(/signature=[^&]*/i, 'signature=***')
+                            );
+                        }
+                        if (NET_PATTERN.test(u) && p && p.then) {
+                            p.then(res => {
+                                try {
+                                    res.clone().text().then(t => recordNet(formatNet(res.status, method, u, t))).catch(() => {});
+                                } catch (e) {}
+                            }).catch(() => {});
                         }
                     } catch (e) {}
-                    return of.apply(this, arguments);
+                    return p;
                 };
             }
         } catch (e) {}
@@ -127,13 +175,13 @@
     // document-start 时 jQuery 可能还没加载，start() 里会重新取
     let jq = window.jQuery || window.$;
 
-    // 导出运行日志（含环境信息、开关状态、最近 300 条事件）
+    // 导出运行日志（含环境信息、开关状态、事件日志、最近 100 条网络请求）
     function exportLog() {
         try {
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.16.9',
+                '脚本版本: 3.17.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -144,7 +192,9 @@
                 '最近上报: ' + (window.__gxReportAt ? new Date(window.__gxReportAt).toLocaleString() : '无'),
                 '--- 日志 ---',
             ].join('\n');
-            const text = env + '\n' + (logBuffer.length ? logBuffer.join('\n') : '（暂无日志）');
+            const text = env + '\n' + (logBuffer.length ? logBuffer.join('\n') : '（暂无日志）')
+                + '\n\n--- 网络请求（最近 ' + NET_MAX + ' 条关键接口）---\n'
+                + (netLog.length ? netLog.join('\n') : '（暂无网络记录）');
             const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
             const a = document.createElement('a');
             const d = new Date();
@@ -2326,7 +2376,7 @@
         const logBtn = document.createElement('button');
         logBtn.className = 'gx-log';
         logBtn.textContent = '导出日志';
-        logBtn.title = '下载运行日志（环境信息 + 开关状态 + 最近 300 条事件）';
+        logBtn.title = '下载运行日志（环境信息 + 开关状态 + 事件日志 + 网络请求，排查掉登录/风控用）';
         logBtn.addEventListener('click', exportLog);
         elPanel.appendChild(logBtn);
 
