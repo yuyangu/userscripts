@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.30.0
+// @version      3.30.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
 // @match        https://*.zhihuishu.com/*
 // @grant        none
 // @run-at       document-start
-// @updateURL    https://raw.githubusercontent.com/yuyangu/userscripts/main/gxnufl-auto-next.user.js
-// @downloadURL  https://raw.githubusercontent.com/yuyangu/userscripts/main/gxnufl-auto-next.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/yuyangu/userscripts@main/gxnufl-auto-next.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/yuyangu/userscripts@main/gxnufl-auto-next.user.js
 // ==/UserScript==
 
 (function () {
@@ -611,7 +611,7 @@
             const head = [
                 '=== GXNUFL 刷课助手 · 网络日志（单独导出）===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.30.0',
+                '脚本版本: 3.30.1',
                 '页面: ' + location.href,
                 '当前域名: ' + location.hostname + '　（日志按域名隔离：跨子域不共享，完整记录请回到课程页导出）',
                 '记录条数: ' + nets.length + ' 条（所有标签页合并，页面重载后仍保留）',
@@ -643,7 +643,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.30.0',
+                '脚本版本: 3.30.1',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -3419,7 +3419,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.30', state);
+        log('脚本已启动 v3.30.1', state);
         // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
         if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
             state.SAVE_DATA = false;
