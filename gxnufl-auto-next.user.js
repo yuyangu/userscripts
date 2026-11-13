@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.18.1
+// @version      3.19.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -197,7 +197,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.18.1',
+                '脚本版本: 3.19.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1275,6 +1275,30 @@
     let zhsStat = null;    // { total, done, count, doneCount, map, fetchedAt }
     let elZhsStat = null;
 
+    // 统计缓存（跨窗口共享）：让所有多开窗口用同一份"完成状态"，避免算出同一个下一个
+    const ZHS_STAT_KEY = 'gxnufl_zhs_stat';
+
+    function saveZhsStat() {
+        try {
+            if (!zhsStat) return;
+            localStorage.setItem(ZHS_STAT_KEY, JSON.stringify({
+                total: zhsStat.total, done: zhsStat.done, count: zhsStat.count,
+                doneCount: zhsStat.doneCount, map: zhsStat.map, fetchedAt: zhsStat.fetchedAt
+            }));
+        } catch (e) {}
+    }
+
+    function loadZhsStatCache() {
+        try {
+            const raw = localStorage.getItem(ZHS_STAT_KEY);
+            if (!raw) return null;
+            const o = JSON.parse(raw);
+            if (!o || !o.map) return null;
+            if (Date.now() - (Number(o.fetchedAt) || 0) > 10 * 60 * 1000) return null;   // 超过 10 分钟不采用
+            return o;
+        } catch (e) { return null; }
+    }
+
     function fmtDuration(sec) {
         sec = Math.max(0, Math.round(sec));
         const h = Math.floor(sec / 3600);
@@ -1325,6 +1349,7 @@
             const list = takeList(res);
             if (!list) return false;
             zhsStat = computeZhsStat(list);
+            saveZhsStat();          // 写入共享缓存，供其他多开窗口同步
             renderZhsStat();
             zhsDecorateDurations();
             log('资源统计：', zhsStat.total, '秒 /', zhsStat.count, '个 / 已完成', zhsStat.doneCount);
@@ -1664,9 +1689,18 @@
 
     // 「多开窗口」每次打开的数量（1 个；需要更多就重复点击）
     const MULTI_COUNT = 1;
+    const MULTI_COOLDOWN = 3000;    // 连点冷却 3 秒
+    let lastMultiClickAt = 0;
 
     // 打开多开窗口：每个播一个未完成资源（优先未看完的），播完自动关闭
     function openParallelWindows() {
+        // 冷却：防止快速连点导致多个窗口选到同一个视频
+        if (Date.now() - lastMultiClickAt < MULTI_COOLDOWN) {
+            const wait = Math.ceil((MULTI_COOLDOWN - (Date.now() - lastMultiClickAt)) / 1000);
+            setStatus('操作太快，请 ' + wait + ' 秒后再点', 'warn');
+            return;
+        }
+        lastMultiClickAt = Date.now();
         const cid = zhsCourseId();
         if (!cid) { setStatus('未取到 courseId，无法多开', 'warn'); return; }
         // 优先用服务端数据（覆盖折叠章节），接口不可用时回退 DOM
@@ -2485,6 +2519,8 @@
                 const n = zhsActiveWindows();
                 const txt = '多开窗口' + (n > 0 ? '（' + n + '）' : '');
                 if (elParBtn.textContent !== txt) elParBtn.textContent = txt;
+                const cooling = Date.now() - lastMultiClickAt < MULTI_COOLDOWN;
+                if (elParBtn.disabled !== cooling) elParBtn.disabled = cooling;
             }
             // 页面渲染出侧栏后再初始化拖拽手柄
             if (!document.getElementById('gxnufl-sidebar-handle')) initSidebarResizer();
@@ -2568,7 +2604,27 @@
         // 智慧树：加载资源统计（等页面初始化完成）；学习资源页加样式标记
         if (IS_ZHS) {
             if (/^wenda\./i.test(location.hostname)) document.body.classList.add('gx-zhs-source');
+            // 先用共享缓存（其他窗口刚更新过的统计），再后台刷新
+            const cached = loadZhsStatCache();
+            if (cached) {
+                zhsStat = cached;
+                renderZhsStat();
+                zhsDecorateDurations();
+                log('已载入共享资源统计缓存（' + cached.count + ' 个视频 / 已完成 ' + cached.doneCount + '）');
+            }
             setTimeout(fetchZhsStats, 2000);
+            // 其他窗口更新统计时实时同步
+            window.addEventListener('storage', (e) => {
+                if (e.key !== ZHS_STAT_KEY || !e.newValue) return;
+                try {
+                    const o = JSON.parse(e.newValue);
+                    if (!o || !o.map) return;
+                    zhsStat = o;
+                    renderZhsStat();
+                    zhsDecorateDurations();
+                    log('已同步其他窗口更新的资源统计');
+                } catch (err) {}
+            });
             setTimeout(clearFalseLocalDone, 3500);   // 清理旧版本误标的完成记录
             // 多开窗口：自动把右侧列表滚到当前播放的视频位置
             if (zhsIsParallelWindow()) setTimeout(zhsScrollToCurrentWhenReady, 1500);
