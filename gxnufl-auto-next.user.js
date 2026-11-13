@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.8
+// @version      3.16.9
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -133,7 +133,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.16.8',
+                '脚本版本: 3.16.9',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1509,7 +1509,20 @@
 
     // 本窗口标识 + 心跳（统计"当前有几个多开窗口在跑"）
     const ZHS_WINS_KEY = 'gxnufl_zhs_wins';
-    const WIN_ID = Math.random().toString(36).slice(2, 8);
+    const ZHS_WIN_TTL = 90000;   // 心跳有效期 90 秒（窗口关掉后自动从计数里消失）
+    // 用 sessionStorage 保存窗口 ID：同一标签页刷新/切换视频后 ID 不变，避免重复计数
+    const WIN_ID = (() => {
+        try {
+            let id = sessionStorage.getItem('gxnufl_win_id');
+            if (!id) {
+                id = Math.random().toString(36).slice(2, 8);
+                sessionStorage.setItem('gxnufl_win_id', id);
+            }
+            return id;
+        } catch (e) {
+            return Math.random().toString(36).slice(2, 8);
+        }
+    })();
 
     function zhsWinHeartbeat() {
         if (!zhsIsParallelWindow()) return;
@@ -1522,7 +1535,7 @@
             Object.keys(m).forEach(k => {
                 const v = m[k];
                 const at = v && typeof v === 'object' ? Number(v.at) || 0 : Number(v) || 0;
-                if (now - at > 180000) delete m[k];
+                if (now - at > ZHS_WIN_TTL) delete m[k];
             });
             writeJsonMap(ZHS_WINS_KEY, m);
         } catch (e) {}
@@ -1537,7 +1550,7 @@
             if (k === WIN_ID) return false;   // 自己不算
             const v = m[k];
             if (!v || typeof v !== 'object') return false;
-            if (now - (Number(v.at) || 0) > 180000) return false;
+            if (now - (Number(v.at) || 0) > ZHS_WIN_TTL) return false;
             return String(v.fid) === String(id);
         });
     }
@@ -1550,7 +1563,7 @@
         Object.keys(m).forEach(k => {
             const v = m[k];
             const at = v && typeof v === 'object' ? Number(v.at) || 0 : Number(v) || 0;
-            if (now - at <= 180000) n++;
+            if (now - at <= ZHS_WIN_TTL) n++;
             else delete m[k];
         });
         try { writeJsonMap(ZHS_WINS_KEY, m); } catch (e) {}
