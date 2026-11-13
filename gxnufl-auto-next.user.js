@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.3
+// @version      3.16.4
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -2120,7 +2120,7 @@
             else disableSaveData(v);
         }),
             IS_ZHS
-                ? '不下载视频画面，按 1x 虚拟播放（智慧树按真实时长计进度，倍速无效）；流量几乎为零'
+                ? '⚠️ 实验性：不下载视频按 1x 虚拟推进，但实测可能不上报学习时长（会白刷），不建议开启'
                 : '不下载视频画面，用虚拟进度推进；弹题与进度上报照常，几乎不耗流量'));
         bodyBox.appendChild(makeRow('后台保活', makeSwitch('KEEP_ALIVE', (on) => {
             if (on) startKeepAlive();
@@ -2311,11 +2311,11 @@
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
         log('脚本已启动 v3.16', state);
-        // 多开窗口：自动开启省流量模式（不下载/不解码视频，显著降低 CPU、内存与流量）
-        if (IS_ZHS && zhsIsParallelWindow() && !state.SAVE_DATA) {
-            state.SAVE_DATA = true;
+        // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
+        if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
+            state.SAVE_DATA = false;
             saveState();
-            log('多开窗口：已自动开启省流量模式');
+            log('多开窗口：已关闭省流量模式（该模式可能不上报进度）');
         }
         buildUI();
         // 后台保活（默认关闭）：开启时先试一次，被自动播放策略拦下则等用户点击后再启动
