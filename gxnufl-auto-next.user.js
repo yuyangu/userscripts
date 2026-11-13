@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.25.0
+// @version      3.26.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -610,7 +610,7 @@
             const head = [
                 '=== GXNUFL 刷课助手 · 网络日志（单独导出）===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.25.0',
+                '脚本版本: 3.26.0',
                 '页面: ' + location.href,
                 '当前域名: ' + location.hostname + '　（日志按域名隔离：跨子域不共享，完整记录请回到课程页导出）',
                 '记录条数: ' + nets.length + ' 条（所有标签页合并，页面重载后仍保留）',
@@ -642,7 +642,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.25.0',
+                '脚本版本: 3.26.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1752,7 +1752,15 @@
         return sec + '秒';
     }
 
-    // 递归统计资源树：总时长、已完成（studyTime >= totalTime）
+    // 智慧树：学习时长达到视频时长的 80% 即算"已完成"（平台口径）
+    const ZHS_DONE_RATIO = 0.8;
+    function zhsNeedSec(t) { return Math.ceil((Number(t) || 0) * ZHS_DONE_RATIO); }
+    function zhsIsDoneSec(s, t) {
+        const tt = Number(t) || 0;
+        return tt > 0 && (Number(s) || 0) >= zhsNeedSec(tt);
+    }
+
+    // 递归统计资源树：总时长、已完成（studyTime >= totalTime * 80%）
     function computeZhsStat(list) {
         let total = 0, done = 0, count = 0, doneCount = 0;
         const map = {};
@@ -1763,8 +1771,8 @@
                     const s = Number(n.studyTime) || 0;
                     total += t;
                     count++;
-                    const isDone = s >= t;
-                    if (isDone) { done += t; doneCount++; }
+                    const isDone = zhsIsDoneSec(s, t);
+                    if (isDone) { done += zhsNeedSec(t); doneCount++; }
                     map[String(n.id)] = { t: t, s: s, done: isDone, name: String(n.name || '').trim() };
                 }
                 if (n.childList) walk(n.childList);
@@ -1835,19 +1843,14 @@
             elZhsStat.textContent = '资源统计：加载中…';
             return;
         }
-        let total = zhsStat.total, done = zhsStat.done;
-        let count = zhsStat.count, doneCount = zhsStat.doneCount;
-        // 合并"多开窗口已播完"但接口快照尚未更新的部分
-        const localDone = readJsonMap(ZHS_DONE_KEY);
-        Object.keys(localDone).forEach(id => {
+        const total = zhsStat.total;
+        const count = zhsStat.count, doneCount = zhsStat.doneCount;
+        // 剩余时长按 80% 完成口径累加：未完成视频只需补到 80%
+        let remain = 0;
+        Object.keys(zhsStat.map).forEach(id => {
             const it = zhsStat.map[id];
-            if (it && !it.done) {
-                it.done = true;
-                done += it.t;
-                doneCount++;
-            }
+            if (it && it.t && !it.done) remain += Math.max(0, zhsNeedSec(it.t) - (Number(it.s) || 0));
         });
-        const remain = Math.max(0, total - done);
         // 下一个待播视频（方便核对切换逻辑）
         let nextTxt = '全部完成';
         try {
@@ -1855,19 +1858,19 @@
             if (pend.length) {
                 const it = zhsStat.map[pend[0].id];
                 const nm = (it && it.name) ? it.name : ('#' + pend[0].id);
-                const remainSec = it && it.t ? Math.max(0, it.t - (Number(it.s) || 0)) : 0;
+                const remainSec = it && it.t ? Math.max(0, zhsNeedSec(it.t) - (Number(it.s) || 0)) : 0;
                 nextTxt = (nm.length > 14 ? nm.slice(0, 14) + '…' : nm) + '（还差 ' + fmtDuration(remainSec) + '）';
             }
         } catch (e) {}
         elZhsStat.innerHTML =
             '<div>资源总时长 <b>' + fmtDuration(total) + '</b>（' + count + ' 个视频）</div>' +
-            '<div>已完成 <b>' + doneCount + '</b> / ' + count + ' 个（平台按个数算进度）</div>' +
+            '<div>已完成 <b>' + doneCount + '</b> / ' + count + ' 个（看满 80% 即完成）</div>' +
             '<div>剩余时长 ' + fmtDuration(remain) + ' · 下一个：' + nextTxt + '</div>';
     }
 
     // 当前视频在服务端已完成（或侧边栏已显示 ✓）→ 自动切到下一个未完成资源
     // 只依据"服务器实时返回的当前视频学习时长"判断是否完成，不依赖本地缓存/DOM ✓
-    // 每次判定都实时请求服务器资源树，用返回的 studyTime >= totalTime 判定；
+    // 每次判定都实时请求服务器资源树，用返回的 studyTime >= totalTime×80% 判定；
     // 判定完成与选下一个，全部使用同一份服务器数据（serverStat），不读 zhsStat 缓存
     const ZHSSWITCH_KEY = 'gxnufl_last_switch_at';
     let lastDoneQueryAt = 0;
@@ -1907,8 +1910,8 @@
                 if (!Array.isArray(list)) return;
                 const serverStat = computeZhsStat(list);   // 服务器实时数据
                 const it = serverStat.map[fid];
-                if (it && it.t && Number(it.s) >= it.t) {
-                    zhsDoSwitch('服务器 studyTime=' + it.s + '/' + it.t, serverStat);
+                if (it && it.t && zhsIsDoneSec(it.s, it.t)) {
+                    zhsDoSwitch('服务器 studyTime=' + it.s + '/' + zhsNeedSec(it.t) + '(80%)', serverStat);
                 }
             },
             error: () => { doneQueryPending = false; },
@@ -2055,9 +2058,8 @@
             if (zhsIsRecentlyAssigned(id)) return;  // 近期已分配给其他窗口
             list.push({ id: id, s: Number(it.s) || 0, t: it.t });
         });
-        // 平台学习进度按完成视频个数计算（不按时长）→ 优先做能最快完成的：
-        // 已看了一点的排前面，且剩余时长越短越优先（看完一个就 +1）
-        list.sort((a, b) => (a.t - a.s) - (b.t - b.s));
+        // 平台按"完成个数"计进度，且看满 80% 即完成 → 优先做最快达到 80% 的
+        list.sort((a, b) => (zhsNeedSec(a.t) - a.s) - (zhsNeedSec(b.t) - b.s));
         return list;
     }
 
@@ -2073,7 +2075,7 @@
                 const it = zhsStat.map[(el.id || '').replace('file_', '')];
                 return it ? (Number(it.s) || 0) : 0;
             };
-            // 同上：按剩余时长升序（DOM 回退时用 studyTime 估算）
+            // 同上：按到 80% 还差多少升序（DOM 回退时用 studyTime 估算）
             list.sort((a, b) => {
                 const ia = zhsStat && zhsStat.map ? zhsStat.map[(a.id || '').replace('file_', '')] : null;
                 const ib = zhsStat && zhsStat.map ? zhsStat.map[(b.id || '').replace('file_', '')] : null;
@@ -2081,7 +2083,7 @@
                 const tb = ib && ib.t ? ib.t : (Number(b.dataset.t) || 0);
                 const sa = ia ? (Number(ia.s) || 0) : getS(a);
                 const sb = ib ? (Number(ib.s) || 0) : getS(b);
-                return (ta - sa) - (tb - sb);
+                return (zhsNeedSec(ta) - sa) - (zhsNeedSec(tb) - sb);
             });
         }
         return list;
@@ -2268,10 +2270,11 @@
         if (v && v.duration && isFinite(v.duration) && v.duration > 0) {
             pct = Math.min(100, Math.round((v.currentTime / v.duration) * 100));
         }
-        if (pct >= 99) { doJumpNext(); return; }
+        const donePct = IS_ZHS ? 80 : 99;   // 智慧树看满 80% 即算完成
+        if (pct >= donePct) { doJumpNext(); return; }
 
         const msg = pct >= 0
-            ? '本节视频还没看完（已看 ' + pct + '%），跳过将不计入视频成绩。确定要跳吗？'
+            ? '本节视频还没看完（已看 ' + pct + '%，需 ' + donePct + '%），跳过将不计入视频成绩。确定要跳吗？'
             : '暂时无法确认本节观看进度，跳过可能不计入视频成绩。确定要跳吗？';
         if (typeof window.alertBox === 'function') {
             try {
@@ -2348,11 +2351,11 @@
                 if (rp0 && rp0.fileId === zhsCurrentFileId() && (Date.now() - rp0.at) < 120000) {
                     serverSec = rp0.rt;
                 }
-                const pct = (it && it.t) ? serverSec / it.t : 1;
+                const needSec = it && it.t ? zhsNeedSec(it.t) : 0;
                 const bufCnt = Number(v.dataset.gxBuf || 0);
-                if (pct >= 0.95 && pct < 1 && bufCnt < 3) {
+                if (needSec && serverSec < needSec && (needSec - serverSec) <= 60 && bufCnt < 3) {
                     v.dataset.gxBuf = String(bufCnt + 1);
-                    log('服务端还差 ' + Math.round((1 - pct) * 100) + '%，补播最后 30 秒补足（第 ' + (bufCnt + 1) + ' 次）');
+                    log('距 80% 完成还差 ' + (needSec - serverSec) + ' 秒，补播最后 30 秒补足（第 ' + (bufCnt + 1) + ' 次）');
                     try {
                         v.currentTime = Math.max(0, (v.duration || 0) - 30);
                         v.play();
@@ -3148,7 +3151,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.25', state);
+        log('脚本已启动 v3.26', state);
         // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
         if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
             state.SAVE_DATA = false;
