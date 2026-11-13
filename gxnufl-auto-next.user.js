@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.26.0
+// @version      3.27.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -610,7 +610,7 @@
             const head = [
                 '=== GXNUFL 刷课助手 · 网络日志（单独导出）===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.26.0',
+                '脚本版本: 3.27.0',
                 '页面: ' + location.href,
                 '当前域名: ' + location.hostname + '　（日志按域名隔离：跨子域不共享，完整记录请回到课程页导出）',
                 '记录条数: ' + nets.length + ' 条（所有标签页合并，页面重载后仍保留）',
@@ -642,7 +642,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.26.0',
+                '脚本版本: 3.27.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -651,6 +651,9 @@
                 '多开窗口: ' + (IS_ZHS ? (zhsIsParallelWindow() ? '是' : '否') : '—'),
                 '资源统计: ' + (zhsStat ? (zhsStat.count + ' 个视频 / 总 ' + fmtDuration(zhsStat.total) + ' / 已完成 ' + zhsStat.doneCount + ' 个') : '未加载'),
                 '最近上报: ' + (window.__gxReportAt ? new Date(window.__gxReportAt).toLocaleString() : '无'),
+                '各标签页正在播放: ' + (IS_ZHS
+                    ? (collectActiveWins().map(w => w.id + (w.main ? '(主)' : '') + '→' + (w.fid || '-')).join('  ') || '无')
+                    : '—'),
                 '当前域名: ' + location.hostname + '　（日志按域名隔离：login./wenda./hike. 子域之间不共享；完整日志请回到课程页导出）',
                 '',
                 '--- 全部标签页日志（跨窗口合并，共 ' + shared.length + ' 条；页面重载后仍保留）---',
@@ -1895,6 +1898,7 @@
         if (!pend.length) return;
         try { sessionStorage.setItem(ZHSSWITCH_KEY, String(Date.now())); } catch (e) {}
         log('当前视频已完成（' + why + '），自动切换到下一个:', pend[0].id);
+        writeWinHeartbeat(String(pend[0].id));   // 立刻预占，防止别的窗口同时选它
         zhsMarkAssigned(pend[0].id);
         zhsSwitchById(pend[0].id);
     }
@@ -2062,11 +2066,13 @@
         const stat = statOverride || zhsStat;
         if (!stat || !stat.map) return [];
         const curId = zhsCurrentFileId();
+        const playing = zhsPlayingFids();   // 每个标签页正在播放的视频 → 排除名单
         const list = [];
         Object.keys(stat.map).forEach(id => {
             const it = stat.map[id];
             if (!it || !it.t) return;
             if (id === curId) return;
+            if (playing[id]) return;                 // 已被某个标签页播放，不再选它
             if (it.done) return;                    // 该数据里显示已完成
             if (zhsIsDoneLocal(id)) return;         // 本地已记录完成
             if (zhsIsRecentlyAssigned(id)) return;  // 近期已分配给其他窗口
@@ -2108,9 +2114,12 @@
         return /[?&]gxParallel=1/.test(location.search);
     }
 
-    // 本窗口标识 + 心跳（统计"当前有几个多开窗口在跑"）
-    const ZHS_WINS_KEY = 'gxnufl_zhs_wins';
+    // 本窗口标识 + 心跳：每个窗口写"自己的独立分片"，
+    // 避免多窗口同时读写同一个 localStorage key 互相覆盖（旧版单 key 会丢掉其他窗口的心跳）
+    const ZHS_WIN_PREFIX = 'gxnufl_zhs_win_';
+    const ZHS_WINS_KEY = 'gxnufl_zhs_wins';   // 旧版单 key，仅用于清理
     const ZHS_WIN_TTL = 90000;   // 心跳有效期 90 秒（窗口关掉后自动从计数里消失）
+    let legacyWinsCleared = false;
     // 用 sessionStorage 保存窗口 ID：同一标签页刷新/切换视频后 ID 不变，避免重复计数
     const WIN_ID = (() => {
         try {
@@ -2125,54 +2134,120 @@
         }
     })();
 
-    function zhsWinHeartbeat() {
+    // 写本窗口的心跳分片（fid 可预占：切换前先写目标，防止别的窗口同时选它）
+    function writeWinHeartbeat(fidOverride) {
         if (!IS_ZHS) return;
         try {
-            const m = readJsonMap(ZHS_WINS_KEY);
-            const now = Date.now();
-            const main = !zhsIsParallelWindow();
-            // 心跳里带上"当前正在播的 fileId"：主窗口也写（带 main 标记），
-            // 这样多开窗口选片时能避开主窗口正在播的视频，不会撞车
-            m[WIN_ID] = { at: now, fid: zhsCurrentFileId() || '', main: main };
-            // 清掉 90 秒没有心跳的（窗口已关闭）
-            Object.keys(m).forEach(k => {
-                const v = m[k];
-                const at = v && typeof v === 'object' ? Number(v.at) || 0 : Number(v) || 0;
-                if (now - at > ZHS_WIN_TTL) delete m[k];
-            });
-            writeJsonMap(ZHS_WINS_KEY, m);
+            localStorage.setItem(ZHS_WIN_PREFIX + WIN_ID, JSON.stringify({
+                at: Date.now(),
+                fid: String(fidOverride || zhsCurrentFileId() || ''),
+                main: !zhsIsParallelWindow()
+            }));
         } catch (e) {}
     }
+    function zhsWinHeartbeat() { writeWinHeartbeat(); }
 
-    // 是否有其他活跃窗口正在播放该资源（心跳里 fid 匹配；含主窗口，避免撞车）
-    function zhsIsPlayingElsewhere(id) {
-        if (!id) return false;
-        const m = readJsonMap(ZHS_WINS_KEY);
+    // 收集所有活跃标签页（含主窗口），顺带清理过期分片与旧版单 key
+    function collectActiveWins() {
         const now = Date.now();
-        return Object.keys(m).some(k => {
-            if (k === WIN_ID) return false;   // 自己不算
-            const v = m[k];
-            if (!v || typeof v !== 'object') return false;
-            if (now - (Number(v.at) || 0) > ZHS_WIN_TTL) return false;
-            return String(v.fid) === String(id);
-        });
+        const out = [];
+        try {
+            const keys = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.indexOf(ZHS_WIN_PREFIX) === 0) keys.push(k);
+            }
+            keys.forEach(k => {
+                let v;
+                try { v = JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { v = null; }
+                if (!v || now - (Number(v.at) || 0) > ZHS_WIN_TTL) {
+                    try { localStorage.removeItem(k); } catch (e) {}
+                    return;
+                }
+                out.push({
+                    id: k.slice(ZHS_WIN_PREFIX.length),
+                    at: Number(v.at) || 0,
+                    fid: String(v.fid || ''),
+                    main: !!v.main
+                });
+            });
+            if (!legacyWinsCleared) {
+                legacyWinsCleared = true;
+                try { localStorage.removeItem(ZHS_WINS_KEY); } catch (e) {}   // 迁移：清掉旧单 key
+            }
+        } catch (e) {}
+        return out;
     }
 
-    // 当前活跃的多开窗口数（最近 3 分钟内还有心跳的）
+    // 所有标签页"正在播放的视频" → 选片排除名单
+    function zhsPlayingFids() {
+        const set = {};
+        collectActiveWins().forEach(w => { if (w.fid) set[w.fid] = true; });
+        return set;
+    }
+
+    // 是否有其他活跃标签页正在播放该资源
+    function zhsIsPlayingElsewhere(id) {
+        if (!id) return false;
+        return collectActiveWins().some(w => w.id !== WIN_ID && w.fid === String(id));
+    }
+
+    // 当前活跃的多开窗口数（主窗口写心跳用于防撞车，但不计数）
     function zhsActiveWindows() {
-        const m = readJsonMap(ZHS_WINS_KEY);
-        const now = Date.now();
-        let n = 0;
-        Object.keys(m).forEach(k => {
-            const v = m[k];
-            const at = v && typeof v === 'object' ? Number(v.at) || 0 : Number(v) || 0;
-            if (now - at > ZHS_WIN_TTL) { delete m[k]; return; }
-            // 主窗口也写心跳（用于防撞车），但不算进"多开窗口数"
-            if (v && typeof v === 'object' && v.main) return;
-            n++;
+        return collectActiveWins().filter(w => !w.main).length;
+    }
+
+    // 主动去重：若多个标签页在播同一个视频，只保留一个，其余跳到"没人播"的视频
+    let lastDupResolveAt = 0;
+    function zhsResolveDuplicate() {
+        if (!IS_ZHS) return;
+        if (Date.now() - lastDupResolveAt < 4000) return;
+        lastDupResolveAt = Date.now();
+        let lastSw = 0;
+        try { lastSw = Number(sessionStorage.getItem(ZHSSWITCH_KEY)) || 0; } catch (e) {}
+        if (Date.now() - lastSw < 6000) return;   // 刚切过来，先稳定
+        const fid = zhsCurrentFileId();
+        if (!fid) return;
+        const wins = collectActiveWins();
+        const peers = wins.filter(w => w.fid === fid);
+        if (peers.length < 2) return;
+        // 保留规则：主窗口优先 → 心跳最早 → 窗口 ID 字典序最小
+        const keeper = peers.slice().sort((a, b) => {
+            if (a.main !== b.main) return a.main ? -1 : 1;
+            if (a.at !== b.at) return a.at - b.at;
+            return a.id < b.id ? -1 : 1;
+        })[0];
+        if (keeper.id === WIN_ID) return;
+        log('检测到重复播放：' + peers.length + ' 个标签页都在播 ' + fid + '，本窗口让路');
+        setTimeout(() => zhsSwitchToFreeVideo(fid), 200 + Math.random() * 600);   // 错开，避免同时抢同一个目标
+    }
+
+    // 用服务器实时数据，挑一个"没有任何标签页在播"的未完成视频
+    function zhsSwitchToFreeVideo(dupFid) {
+        const cid = zhsCourseId();
+        if (!jq || !jq.ajax || !cid) return;
+        jq.ajax({
+            url: '//studyResources.zhihuishu.com/studyResources/stuResouce/queryResourceMenuTree',
+            data: { courseId: cid },
+            dataType: 'jsonp',
+            timeout: 8000,
+            success: (res) => {
+                const list = (res && (res.rt || res.data)) || [];
+                if (!Array.isArray(list)) return;
+                const serverStat = computeZhsStat(list);
+                const playing = zhsPlayingFids();
+                const pend = zhsPendingIds(serverStat).filter(x =>
+                    !playing[String(x.id)] && String(x.id) !== String(dupFid));
+                if (!pend.length) { log('重复播放：暂无空闲视频可切换'); return; }
+                const target = pend[0].id;
+                try { sessionStorage.setItem(ZHSSWITCH_KEY, String(Date.now())); } catch (e) {}
+                writeWinHeartbeat(String(target));   // 立刻预占，防止其他窗口同时选它
+                zhsMarkAssigned(target);
+                log('重复播放 → 切换到未被播放的视频:', target);
+                zhsSwitchById(target);
+            },
+            error: () => {}
         });
-        try { writeJsonMap(ZHS_WINS_KEY, m); } catch (e) {}
-        return n;
     }
 
     // 「多开窗口」每次打开的数量（1 个；需要更多就重复点击）
@@ -3096,8 +3171,9 @@
             selfCheckSaveMode();
             zhsSkipIfDone();
             zhsRefreshStatsIfStale();
-            // 多开窗口心跳 + 按钮上显示当前活跃窗口数
+            // 每窗口独立心跳 + 主动去重（重复播放时自动让路）
             zhsWinHeartbeat();
+            zhsResolveDuplicate();
             if (elParBtn) {
                 const n = zhsActiveWindows();
                 const txt = '多开窗口' + (n > 0 ? '（' + n + '）' : '');
@@ -3165,7 +3241,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.26', state);
+        log('脚本已启动 v3.27', state);
         // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
         if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
             state.SAVE_DATA = false;
