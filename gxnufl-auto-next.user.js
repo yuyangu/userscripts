@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.17.0
+// @version      3.17.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -181,7 +181,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.17.0',
+                '脚本版本: 3.17.1',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1575,13 +1575,15 @@
     })();
 
     function zhsWinHeartbeat() {
-        if (!zhsIsParallelWindow()) return;
+        if (!IS_ZHS) return;
         try {
             const m = readJsonMap(ZHS_WINS_KEY);
             const now = Date.now();
-            // 心跳里带上"当前正在播的 fileId"，用于精确判断资源是否已被别的窗口占用
-            m[WIN_ID] = { at: now, fid: zhsCurrentFileId() || '' };
-            // 清掉 3 分钟没有心跳的（窗口已关闭）
+            const main = !zhsIsParallelWindow();
+            // 心跳里带上"当前正在播的 fileId"：主窗口也写（带 main 标记），
+            // 这样多开窗口选片时能避开主窗口正在播的视频，不会撞车
+            m[WIN_ID] = { at: now, fid: zhsCurrentFileId() || '', main: main };
+            // 清掉 90 秒没有心跳的（窗口已关闭）
             Object.keys(m).forEach(k => {
                 const v = m[k];
                 const at = v && typeof v === 'object' ? Number(v.at) || 0 : Number(v) || 0;
@@ -1591,7 +1593,7 @@
         } catch (e) {}
     }
 
-    // 是否有其他活跃窗口正在播放该资源（心跳里 fid 匹配）
+    // 是否有其他活跃窗口正在播放该资源（心跳里 fid 匹配；含主窗口，避免撞车）
     function zhsIsPlayingElsewhere(id) {
         if (!id) return false;
         const m = readJsonMap(ZHS_WINS_KEY);
@@ -1613,8 +1615,10 @@
         Object.keys(m).forEach(k => {
             const v = m[k];
             const at = v && typeof v === 'object' ? Number(v.at) || 0 : Number(v) || 0;
-            if (now - at <= ZHS_WIN_TTL) n++;
-            else delete m[k];
+            if (now - at > ZHS_WIN_TTL) { delete m[k]; return; }
+            // 主窗口也写心跳（用于防撞车），但不算进"多开窗口数"
+            if (v && typeof v === 'object' && v.main) return;
+            n++;
         });
         try { writeJsonMap(ZHS_WINS_KEY, m); } catch (e) {}
         return n;
