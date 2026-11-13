@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.18.0
+// @version      3.18.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -35,6 +35,18 @@
         } catch (e) {}
     }
 
+    // 上报响应里的 rt = 该视频在服务端的"累计学习时长(秒)"
+    // 用它可以立刻知道服务端是否已记满，不必等统计接口刷新
+    function noteStudyReport(url, body) {
+        try {
+            if (!/saveStuStudyRecord/i.test(String(url || ''))) return;
+            const m = String(body || '').match(/"rt"\s*:\s*(\d+)/);
+            if (!m) return;
+            const fid = (String(url).match(/fileId=(\d+)/) || [])[1] || '';
+            window.__gxRt = { at: Date.now(), rt: parseInt(m[1], 10), fileId: fid };
+        } catch (e) {}
+    }
+
     // 尽早挂钩子：捕获学习上报参数 + 记录关键接口的请求/响应
     (function hookStudyReport() {
         try {
@@ -54,6 +66,7 @@
                                     if (!this.responseType || this.responseType === 'text') body = this.responseText || '';
                                 } catch (e) {}
                                 recordNet(formatNet(this.status, this.__gxMethod, this.__gxUrl, body));
+                                noteStudyReport(this.__gxUrl, body);
                             } catch (e) {}
                         });
                     }
@@ -91,7 +104,10 @@
                         if (NET_PATTERN.test(u) && p && p.then) {
                             p.then(res => {
                                 try {
-                                    res.clone().text().then(t => recordNet(formatNet(res.status, method, u, t))).catch(() => {});
+                                    res.clone().text().then(t => {
+                                        recordNet(formatNet(res.status, method, u, t));
+                                        noteStudyReport(u, t);
+                                    }).catch(() => {});
                                 } catch (e) {}
                             }).catch(() => {});
                         }
@@ -181,7 +197,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.18.0',
+                '脚本版本: 3.18.1',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1384,19 +1400,31 @@
     let lastSkipCheckAt = 0;
     function zhsSkipIfDone() {
         if (!IS_ZHS || !zhsStat || !zhsStat.map) return;
-        if (Date.now() - lastSkipCheckAt < 5000) return;
+        if (Date.now() - lastSkipCheckAt < 3000) return;
         lastSkipCheckAt = Date.now();
         const fid = zhsCurrentFileId();
         if (!fid) return;
         const it = zhsStat.map[fid];
-        // 两个条件任一满足即视为完成：①服务端学习时长达到视频时长 ②侧边栏出现 ✓
+
+        // ①最近一次上报响应里的 rt（服务端累计学习时长，最快最准）
+        let rtDone = false, rtVal = -1;
+        const rp = window.__gxRt;
+        if (rp && rp.fileId === fid && (Date.now() - rp.at) < 120000 && it && it.t) {
+            rtVal = rp.rt;
+            rtDone = rp.rt >= it.t;
+        }
+        // ②统计快照里的完成标记
         const serverDone = !!(it && it.done);
+        // ③侧边栏 ✓
         const el = document.getElementById('file_' + fid);
         const domDone = !!(el && el.querySelector('.status-box .icon-finish'));
-        if (!serverDone && !domDone) return;
+
+        if (!rtDone && !serverDone && !domDone) return;
         const pend = zhsPendingIds();
         if (!pend.length) return;
-        log('当前视频已完成（' + (serverDone ? '服务端时长已满' : '侧边栏 ✓') + '），自动切换到下一个未完成资源:', pend[0].id);
+        const why = rtDone ? ('服务端 rt=' + rtVal + '/' + it.t)
+            : (serverDone ? '统计已完成' : '侧边栏 ✓');
+        log('当前视频已完成（' + why + '），自动切换到下一个未完成资源:', pend[0].id);
         zhsMarkAssigned(pend[0].id);
         zhsSwitchById(pend[0].id);
     }
@@ -1808,7 +1836,13 @@
             if (IS_ZHS) {
                 // 先看服务端完成度：只差一点就补播最后 30 秒（把学习时长补满），避免整段重刷
                 const it = (zhsStat && zhsStat.map) ? zhsStat.map[zhsCurrentFileId()] : null;
-                const pct = (it && it.t) ? (Number(it.s) || 0) / it.t : 1;
+                // 优先用上报响应里的 rt（服务端累计时长，最准）
+                let serverSec = it ? (Number(it.s) || 0) : 0;
+                const rp0 = window.__gxRt;
+                if (rp0 && rp0.fileId === zhsCurrentFileId() && (Date.now() - rp0.at) < 120000) {
+                    serverSec = rp0.rt;
+                }
+                const pct = (it && it.t) ? serverSec / it.t : 1;
                 const bufCnt = Number(v.dataset.gxBuf || 0);
                 if (pct >= 0.95 && pct < 1 && bufCnt < 3) {
                     v.dataset.gxBuf = String(bufCnt + 1);
