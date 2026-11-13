@@ -415,8 +415,19 @@
         body.appendChild(info);
 
         const sec2 = document.createElement('div');
-        sec2.className = 'gxl-sec'; sec2.textContent = '最近日志记录预览（所有标签页，最近 40 条）';
+        sec2.className = 'gxl-sec gxl-sec-tabs';
+        const sec2Label = document.createElement('span');
+        sec2Label.textContent = '最近日志预览（所有标签页，最近 40 条）';
+        const tabWrap = document.createElement('span');
+        tabWrap.className = 'gxl-tabs';
+        const tabEv = document.createElement('button');
+        tabEv.className = 'gxl-tab on'; tabEv.textContent = '事件';
+        const tabNet = document.createElement('button');
+        tabNet.className = 'gxl-tab'; tabNet.textContent = '网络';
+        tabWrap.appendChild(tabEv); tabWrap.appendChild(tabNet);
+        sec2.appendChild(sec2Label); sec2.appendChild(tabWrap);
         body.appendChild(sec2);
+        let previewKind = 'l';
         const preview = document.createElement('div');
         preview.className = 'gxl-preview';
         body.appendChild(preview);
@@ -432,9 +443,10 @@
         };
         const refreshBtn = mkBtn('刷新预览');
         const exportBtn = mkBtn('导出日志');
+        const exportNetBtn = mkBtn('导出网络');
         const clearBtn = mkBtn('清空日志');
         const doneBtn = mkBtn('完成', 'primary');
-        [refreshBtn, exportBtn, clearBtn, doneBtn].forEach(b => foot.appendChild(b));
+        [refreshBtn, exportBtn, exportNetBtn, clearBtn, doneBtn].forEach(b => foot.appendChild(b));
         dlg.appendChild(foot);
         const resizeHandle = document.createElement('div');
         resizeHandle.className = 'gxl-resize';
@@ -526,16 +538,25 @@
             flushSharedLogs();
             const st = logStats();
             const c = getLogCfg();
-            info.textContent = '当前：共 ' + st.count + ' 条 / ' + st.shards + ' 个标签页分片 / 约 ' + st.kb + ' KB'
+            const netCnt = collectSharedLogs('n').length;
+            info.textContent = '当前：事件 ' + st.count + ' 条 / 网络 ' + netCnt + ' 条 / ' + st.shards + ' 个标签页分片 / 约 ' + st.kb + ' KB'
                 + '　上限：' + c.lines + ' 条 · ' + c.hours + ' 小时 · ' + Math.round(c.maxBytes / 1024) + ' KB/分片'
                 + (/^login\./i.test(location.hostname)
                     ? '\n⚠️ 当前在登录页：日志按域名隔离，这里的记录是独立的；回到课程页可导出完整时间线。'
                     : '');
-            const recent = st.all.slice(-40).reverse();
-            preview.textContent = recent.length ? recent.map(fmtLogLine).join('\n') : '（暂无日志记录）';
+            const src = collectSharedLogs(previewKind);
+            const recent = src.slice(-40).reverse();
+            preview.textContent = recent.length
+                ? recent.map(x => previewKind === 'n' ? x.m : fmtLogLine(x)).join('\n')
+                : (previewKind === 'n' ? '（暂无网络记录）' : '（暂无日志记录）');
+            tabEv.classList.toggle('on', previewKind === 'l');
+            tabNet.classList.toggle('on', previewKind === 'n');
         }
+        tabEv.addEventListener('click', () => { previewKind = 'l'; renderPreview(); });
+        tabNet.addEventListener('click', () => { previewKind = 'n'; renderPreview(); });
         refreshBtn.addEventListener('click', renderPreview);
         exportBtn.addEventListener('click', exportLog);
+        exportNetBtn.addEventListener('click', exportNetLog);
         let confirmClear = false;
         clearBtn.addEventListener('click', () => {
             if (!confirmClear) {
@@ -565,6 +586,46 @@
     }
     // document-start 时 jQuery 可能还没加载，start() 里会重新取
     let jq = window.jQuery || window.$;
+
+    // 通用文本下载（导出日志 / 导出网络日志共用）
+    function saveTextFile(prefix, text, okMsg) {
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        const d = new Date();
+        const p2 = n => String(n).padStart(2, '0');
+        a.download = prefix + '-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate())
+            + '-' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds()) + '.txt';
+        a.href = URL.createObjectURL(blob);
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 3000);
+        setStatus(okMsg || '已导出（浏览器下载 txt）', 'ok');
+    }
+
+    // 单独导出网络日志（所有标签页合并，按时间排序；不掺杂事件日志）
+    function exportNetLog() {
+        try {
+            flushSharedLogs();
+            const nets = collectSharedLogs('n');
+            const head = [
+                '=== GXNUFL 刷课助手 · 网络日志（单独导出）===',
+                '导出时间: ' + new Date().toLocaleString(),
+                '脚本版本: 3.25.0',
+                '页面: ' + location.href,
+                '当前域名: ' + location.hostname + '　（日志按域名隔离：跨子域不共享，完整记录请回到课程页导出）',
+                '记录条数: ' + nets.length + ' 条（所有标签页合并，页面重载后仍保留）',
+                '说明: 仅记录关键接口（stuStudy / studyResources / userInfo / isLogin / login / session / auth / token 等）',
+                '',
+                '--- 网络请求 ---',
+            ].join('\n');
+            const body = nets.length ? nets.map(x => x.m).join('\n') : '（暂无网络记录）';
+            const tail = '\n\n--- 本页网络请求（最近 ' + NET_MAX + ' 条）---\n'
+                + (netLog.length ? netLog.join('\n') : '（暂无网络记录）');
+            saveTextFile('gxnufl-netlog', head + '\n' + body + tail, '网络日志已单独导出');
+        } catch (e) {
+            setStatus('网络日志导出失败：' + e.message, 'warn');
+        }
+    }
 
     // 导出运行日志（含环境信息、开关状态、事件日志、最近 100 条网络请求）
     function exportLog() {
@@ -600,17 +661,7 @@
                 + (sharedNet.length ? sharedNet.map(x => x.m).join('\n') : '（暂无网络记录）')
                 + '\n\n--- 本页网络请求（最近 ' + NET_MAX + ' 条关键接口）---\n'
                 + (netLog.length ? netLog.join('\n') : '（暂无网络记录）');
-            const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-            const a = document.createElement('a');
-            const d = new Date();
-            const p2 = n => String(n).padStart(2, '0');
-            a.download = 'gxnufl-log-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate())
-                + '-' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds()) + '.txt';
-            a.href = URL.createObjectURL(blob);
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 3000);
-            setStatus('日志已导出（浏览器下载 txt）', 'ok');
+            saveTextFile('gxnufl-log', text, '日志已导出（浏览器下载 txt）');
         } catch (e) {
             setStatus('日志导出失败：' + e.message, 'warn');
         }
@@ -2513,6 +2564,17 @@
 }
 #gxnufl-logdlg .gxl-foot { display: flex; gap: 6px; padding: 10px 14px; border-top: 1px solid rgba(255,255,255,0.1); }
 #gxnufl-logdlg .gxl-foot { flex: 0 0 auto; }
+#gxnufl-logdlg .gxl-foot { flex-wrap: wrap; }
+#gxnufl-logdlg .gxl-btn { flex: 1 1 30%; min-width: 78px; }
+#gxnufl-logdlg .gxl-sec-tabs { display: flex; justify-content: space-between; align-items: center; }
+#gxnufl-logdlg .gxl-tabs { display: flex; gap: 4px; }
+#gxnufl-logdlg .gxl-tab {
+    padding: 2px 9px; border-radius: 5px; cursor: pointer; font-size: 10.5px;
+    background: rgba(255,255,255,0.06); color: #9aa0a6;
+    border: 1px solid rgba(255,255,255,0.14); font-family: inherit;
+}
+#gxnufl-logdlg .gxl-tab:hover { color: #fff; }
+#gxnufl-logdlg .gxl-tab.on { background: rgba(79,142,247,0.22); border-color: rgba(79,142,247,0.5); color: #cfe0ff; }
 #gxnufl-logdlg .gxl-resize {
     position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
     cursor: nwse-resize; z-index: 2;
