@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.27.0
+// @version      3.28.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -610,7 +610,7 @@
             const head = [
                 '=== GXNUFL 刷课助手 · 网络日志（单独导出）===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.27.0',
+                '脚本版本: 3.28.0',
                 '页面: ' + location.href,
                 '当前域名: ' + location.hostname + '　（日志按域名隔离：跨子域不共享，完整记录请回到课程页导出）',
                 '记录条数: ' + nets.length + ' 条（所有标签页合并，页面重载后仍保留）',
@@ -642,7 +642,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.27.0',
+                '脚本版本: 3.28.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -2859,6 +2859,38 @@
         elPanel.style.top = top + 'px';
     }
 
+    // 把元素拉回可视区域：窗口尺寸变化后，记忆的绝对坐标可能跑到屏幕外
+    function clampElToViewport(el) {
+        if (!el || el.style.display === 'none') return;
+        const r = el.getBoundingClientRect();
+        if (!r.width && !r.height) return;
+        const maxLeft = Math.max(4, window.innerWidth - r.width - 4);
+        const maxTop = Math.max(4, window.innerHeight - r.height - 4);
+        let left = r.left, top = r.top, changed = false;
+        if (left > maxLeft) { left = maxLeft; changed = true; }
+        if (top > maxTop) { top = maxTop; changed = true; }
+        if (left < 4) { left = 4; changed = true; }
+        if (top < 4) { top = 4; changed = true; }
+        if (changed) {
+            el.style.right = 'auto'; el.style.bottom = 'auto';
+            el.style.left = left + 'px'; el.style.top = top + 'px';
+        }
+    }
+
+    // 重置胶囊 / 面板 / 日志窗口的位置（右键胶囊或标题栏，或 Alt+P）
+    function resetUIPos() {
+        [PILL_POS_KEY, PANEL_POS_KEY, 'gxnufl_logdlg_rect'].forEach(k => {
+            try { localStorage.removeItem(k); } catch (e) {}
+        });
+        [elPill, elPanel].forEach(el => {
+            if (!el) return;
+            el.style.left = 'auto'; el.style.top = 'auto';
+            el.style.right = '12px'; el.style.bottom = '12px';
+        });
+        log('已重置胶囊/面板/日志窗口位置');
+        setStatus('已重置面板位置', 'ok');
+    }
+
     // el: 要移动的元素；handle: 拖动手柄（默认 el 自身）；posKey: 位置存储键
     function makeDraggable(el, handle, posKey) {
         const dragEl = handle || el;
@@ -2872,6 +2904,7 @@
             el.style.bottom = 'auto';
             el.style.left = saved.left;
             el.style.top = saved.top;
+            setTimeout(() => clampElToViewport(el), 0);   // 窗口变小后拉回屏幕
         }
 
         dragEl.addEventListener('mousedown', (e) => {
@@ -2950,6 +2983,23 @@
             if (open) syncPanelPos();
         }
         if (elPill) elPill.style.display = open ? 'none' : 'flex';
+        clampElToViewport(open ? elPanel : elPill);
+    }
+
+    // 自愈：确保"面板或胶囊至少有一个可见且在屏幕内"（防止意外全部消失）
+    let lastUIVisibleCheckAt = 0;
+    function ensureUIVisible(force) {
+        if (!elPill || !elPanel) return;
+        if (!force && Date.now() - lastUIVisibleCheckAt < 2000) return;
+        lastUIVisibleCheckAt = Date.now();
+        // 页面（播放器/SPA）重建 DOM 后，元素可能被摘掉 → 重新挂回
+        try {
+            if (!elPill.isConnected) document.body.appendChild(elPill);
+            if (!elPanel.isConnected) document.body.appendChild(elPanel);
+        } catch (e) {}
+        const el = panelVisible ? elPanel : elPill;
+        if (el.style.display === 'none') el.style.display = (el === elPill) ? 'flex' : 'block';
+        clampElToViewport(el);
     }
 
     function buildUI() {
@@ -2964,8 +3014,9 @@
         pillText.textContent = '刷课助手';
         elPill.appendChild(elPillDot);
         elPill.appendChild(pillText);
-        elPill.title = '点击打开设置面板，按住可拖动位置';
+        elPill.title = '点击打开设置面板，按住可拖动位置；右键重置位置；Alt+P 强制显示';
         elPill.addEventListener('click', () => setPanelOpen(true));
+        elPill.addEventListener('contextmenu', (e) => { e.preventDefault(); resetUIPos(); clampElToViewport(elPill); });
         document.body.appendChild(elPill);
         makeDraggable(elPill);
 
@@ -2983,6 +3034,8 @@
         min.textContent = '—';
         min.title = '收起面板';
         min.addEventListener('click', () => setPanelOpen(false));
+        head.addEventListener('contextmenu', (e) => { e.preventDefault(); resetUIPos(); syncPanelPos(); });
+        head.title = '拖动移动位置；右键重置位置';
         head.appendChild(title);
         head.appendChild(min);
 
@@ -3140,12 +3193,30 @@
         // 点击页面其他区域（面板与胶囊之外）自动收起面板（临时收起，不改变记忆偏好）
         document.addEventListener('click', (e) => {
             if (!panelVisible) return;
+            if (document.getElementById('gxnufl-logdlg-overlay')) return;   // 日志设置弹窗内点击不收起
             if (elPanel && elPanel.contains(e.target)) return;
             if (elPill && elPill.contains(e.target)) return;
             setPanelOpen(false, false);
         }, true);
 
+        // 窗口尺寸变化时把胶囊/面板拉回可视区
+        window.addEventListener('resize', () => {
+            clampElToViewport(elPill);
+            if (panelVisible) clampElToViewport(elPanel);
+        });
+
+        // 救命快捷键：Alt+P 强制复位并显示设置面板
+        document.addEventListener('keydown', (e) => {
+            if (e.altKey && (e.key === 'p' || e.key === 'P')) {
+                e.preventDefault();
+                resetUIPos();
+                setPanelOpen(true);
+                setStatus('已强制显示设置面板', 'ok');
+            }
+        });
+
         setPanelOpen(state._panelOpen !== false, false);
+        setTimeout(() => ensureUIVisible(true), 300);
     }
 
     function setStatus(text, level) {
@@ -3160,6 +3231,8 @@
     // ===================== 主循环 =====================
     function tick() {
         bindVideo();
+        // UI 自愈：胶囊/面板若被页面重建 DOM 冲掉或在屏幕外，自动恢复
+        ensureUIVisible();
         // 转存 hook 捕获的上报日志（进内存缓冲，导出日志时可见）
         if (window.__gxHookLog && window.__gxHookLog.length) {
             try { window.__gxHookLog.splice(0).forEach(l => log(l)); } catch (e) {}
@@ -3241,7 +3314,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.27', state);
+        log('脚本已启动 v3.28', state);
         // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
         if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
             state.SAVE_DATA = false;
