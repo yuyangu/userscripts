@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.5
+// @version      3.16.6
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -133,7 +133,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.16.5',
+                '脚本版本: 3.16.6',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1239,6 +1239,7 @@
 
     function fetchZhsStats() {
         if (!IS_ZHS) return;
+        lastStatRefreshAt = Date.now();
         const cid = zhsCourseId();
         if (!cid) return;
         const base = '//studyResources.zhihuishu.com/studyResources/stuResouce/';
@@ -1313,6 +1314,31 @@
         elZhsStat.innerHTML =
             '<div>资源总时长 <b>' + fmtDuration(total) + '</b>（' + count + ' 个视频）</div>' +
             '<div>已完成 ' + doneCount + ' 个 · 剩余 <b>' + fmtDuration(remain) + '</b></div>';
+    }
+
+    // 当前视频在服务端已完成 → 自动切到下一个未完成资源（避免手动点开已完成视频后白播）
+    let lastSkipCheckAt = 0;
+    function zhsSkipIfDone() {
+        if (!IS_ZHS || !zhsStat || !zhsStat.map) return;
+        if (Date.now() - lastSkipCheckAt < 5000) return;
+        lastSkipCheckAt = Date.now();
+        const fid = zhsCurrentFileId();
+        const it = zhsStat.map[fid];
+        if (!it || !it.done) return;
+        const pend = zhsPendingIds();
+        if (!pend.length) return;
+        log('当前视频已完成（服务端），自动切换到下一个未完成资源:', pend[0].id);
+        zhsMarkAssigned(pend[0].id);
+        zhsSwitchById(pend[0].id);
+    }
+
+    // 统计定时刷新（每 5 分钟，确保"已完成"判断不过期）
+    let lastStatRefreshAt = 0;
+    function zhsRefreshStatsIfStale() {
+        if (!IS_ZHS || !zhsStat) return;
+        if (Date.now() - lastStatRefreshAt < 5 * 60 * 1000) return;
+        lastStatRefreshAt = Date.now();
+        fetchZhsStats();
     }
 
     function zhsCurrentFileId() {
@@ -2248,6 +2274,8 @@
             lastZhsSyncAt = Date.now();
             zhsDecorateDurations();
             selfCheckSaveMode();
+            zhsSkipIfDone();
+            zhsRefreshStatsIfStale();
             // 多开窗口心跳 + 按钮上显示当前活跃窗口数
             zhsWinHeartbeat();
             if (elParBtn) {
