@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.29.0
+// @version      3.30.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -611,7 +611,7 @@
             const head = [
                 '=== GXNUFL 刷课助手 · 网络日志（单独导出）===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.29.0',
+                '脚本版本: 3.30.0',
                 '页面: ' + location.href,
                 '当前域名: ' + location.hostname + '　（日志按域名隔离：跨子域不共享，完整记录请回到课程页导出）',
                 '记录条数: ' + nets.length + ' 条（所有标签页合并，页面重载后仍保留）',
@@ -643,7 +643,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.29.0',
+                '脚本版本: 3.30.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -2048,6 +2048,26 @@
     // 按 fileId 直接切换（不需要 DOM 元素，折叠章节里的视频也能切）
     function zhsSwitchById(id) {
         if (!id) return false;
+        // 多开窗口自己构造 URL：页面 changeFile() 不带 gxParallel/gxw，
+        // 切一次就会退化成"主窗口"（心跳标记错误、计数丢失）
+        if (IS_ZHS && zhsIsParallelWindow()) {
+            const cid = zhsCourseId();
+            if (cid) {
+                try {
+                    const qs = new URLSearchParams(location.search);
+                    qs.set('courseId', cid);
+                    qs.set('fileId', String(id));
+                    qs.set('gxParallel', '1');
+                    qs.set('gxw', WIN_ID);
+                    location.href = location.origin + location.pathname + '?' + qs.toString();
+                    return true;
+                } catch (e) {
+                    location.href = location.origin + location.pathname
+                        + '?courseId=' + cid + '&fileId=' + id + '&gxParallel=1&gxw=' + WIN_ID;
+                    return true;
+                }
+            }
+        }
         if (typeof window.changeFile === 'function') {
             window.changeFile(String(id));
             return true;
@@ -2076,6 +2096,7 @@
             if (!it || !it.t) return;
             if (id === curId) return;
             if (playing[id]) return;                 // 已被某个标签页播放，不再选它
+            if (zhsIsReserved(id)) return;           // 刚被预约（多开点击瞬间），避免重复
             if (it.done) return;                    // 该数据里显示已完成
             if (zhsIsDoneLocal(id)) return;         // 本地已记录完成
             if (zhsIsRecentlyAssigned(id)) return;  // 近期已分配给其他窗口
@@ -2134,24 +2155,47 @@
     const ZHS_WINS_KEY = 'gxnufl_zhs_wins';   // 旧版单 key，仅用于清理
     const ZHS_WIN_TTL = 90000;   // 心跳有效期 90 秒（窗口关掉后自动从计数里消失）
     let legacyWinsCleared = false;
-    // 用 sessionStorage 保存窗口 ID：同一标签页刷新/切换视频后 ID 不变，避免重复计数
+    // 窗口 ID：必须"每个标签页唯一"。
+    // 不能用 sessionStorage —— window.open 打开的新标签页会复制 opener 的 sessionStorage，
+    // 导致所有多开窗口共用同一个 ID（心跳互相覆盖、去重失效）。
+    // 方案：①URL 的 gxw 参数（主窗口开多开时生成，最可靠）
+    //      ②window.name（同标签页整页跳转/刷新会保留，新标签页不会继承 opener）
+    //      ③都不行才新生成
+    function genWinId() { return Math.random().toString(36).slice(2, 8); }
     const WIN_ID = (() => {
-        try {
-            let id = sessionStorage.getItem('gxnufl_win_id');
-            if (!id) {
-                id = Math.random().toString(36).slice(2, 8);
-                sessionStorage.setItem('gxnufl_win_id', id);
-            }
-            return id;
-        } catch (e) {
-            return Math.random().toString(36).slice(2, 8);
+        const m = location.search.match(/[?&]gxw=([a-z0-9]{4,12})/i);
+        if (m) {
+            try { window.name = 'gxw_' + m[1]; } catch (e) {}
+            return m[1];
         }
+        try {
+            const nm = String(window.name || '');
+            if (/^gxw_[a-z0-9]{4,12}$/.test(nm)) return nm.slice(4);
+        } catch (e) {}
+        const id = genWinId();
+        try { window.name = 'gxw_' + id; } catch (e) {}
+        try { sessionStorage.setItem('gxnufl_win_id', id); } catch (e) {}
+        return id;
     })();
 
     // 写本窗口的心跳分片（fid 可预占：切换前先写目标，防止别的窗口同时选它）
     function writeWinHeartbeat(fidOverride) {
         if (!IS_ZHS) return;
         try {
+            // 冲突自检：同一 key 若刚被"别的 fid"写过，说明有窗口共用了 ID
+            const cur = JSON.parse(localStorage.getItem(ZHS_WIN_PREFIX + WIN_ID) || 'null');
+            const myFid = String(fidOverride || zhsCurrentFileId() || '');
+            if (cur && cur.fid && cur.fid !== myFid && Date.now() - (Number(cur.at) || 0) < 1200) {
+                if (!window.__gxIdWarned) {
+                    window.__gxIdWarned = true;
+                    log('⚠️ 窗口 ID 冲突（' + WIN_ID + '）：另一个标签页也在用，已自动改用独立 key');
+                }
+                // 用 window.name 生成一个备用 ID 前缀（不改变 WIN_ID 语义，只隔离心跳 key）
+                localStorage.setItem(ZHS_WIN_PREFIX + WIN_ID + '_' + genWinId(), JSON.stringify({
+                    at: Date.now(), fid: myFid, main: !zhsIsParallelWindow()
+                }));
+                return;
+            }
             localStorage.setItem(ZHS_WIN_PREFIX + WIN_ID, JSON.stringify({
                 at: Date.now(),
                 fid: String(fidOverride || zhsCurrentFileId() || ''),
@@ -2191,6 +2235,25 @@
             }
         } catch (e) {}
         return out;
+    }
+
+    // 「预约」：点击多开时立刻占位 15 秒（新窗口要 2 秒才写心跳，这段时间会漏判）
+    const ZHS_RESERVE_KEY = 'gxnufl_zhs_reserve';
+    function zhsReserve(id) {
+        if (!id) return;
+        try {
+            const m = readJsonMap(ZHS_RESERVE_KEY);
+            const now = Date.now();
+            Object.keys(m).forEach(k => { if (now - (Number(m[k]) || 0) > 15000) delete m[k]; });
+            m[String(id)] = now;
+            writeJsonMap(ZHS_RESERVE_KEY, m);
+        } catch (e) {}
+    }
+    function zhsIsReserved(id) {
+        if (!id) return false;
+        const m = readJsonMap(ZHS_RESERVE_KEY);
+        const at = Number(m[String(id)]) || 0;
+        return at > 0 && (Date.now() - at) < 15000;
     }
 
     // 所有标签页"正在播放的视频" → 选片排除名单
@@ -2292,11 +2355,13 @@
         let opened = 0;
         for (let i = 0; i < total; i++) {
             const id = pend[i];
-            const url = base + '?courseId=' + cid + '&fileId=' + id + '&gxParallel=1';
+            // 每个多开窗口带唯一 gxw（防止新标签页复制 sessionStorage 导致窗口 ID 撞车）
+            const url = base + '?courseId=' + cid + '&fileId=' + id + '&gxParallel=1&gxw=' + genWinId();
             try {
                 const w = feat ? window.open(url, 'gxmulti_' + id, feat) : window.open(url, '_blank');
                 if (w) {
                     opened++;
+                    zhsReserve(id);        // 立刻预约（15 秒），防止连点/新窗口未写心跳时被重复选中
                     zhsMarkAssigned(id);   // 记录已分配，防止二次点击重复开同一批
                     if (!state.MULTI_WIN) {
                         // 标签页模式：立刻让新标签页失焦（尽量不抢当前页）
@@ -3354,7 +3419,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.29', state);
+        log('脚本已启动 v3.30', state);
         // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
         if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
             state.SAVE_DATA = false;
