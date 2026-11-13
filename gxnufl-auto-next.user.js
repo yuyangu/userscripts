@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.28.0
+// @version      3.29.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -142,6 +142,7 @@
         LOG_MAX_LINES: 300,     // 日志记录条数（每个标签页分片 / 本页内存上限）
         LOG_TTL_HOURS: 24,      // 自动清理周期（小时）：超过该时长的日志自动删除
         LOG_MAX_KB: 512,        // 日志最大大小（KB，每个分片）：超出自动丢弃最旧的
+        NEXT_ORDER: 'fast',     // 切换顺序：fast=最快完成 / list=侧边栏顺序 / short=短视频优先
         DELAY_ANSWER_MIN: 2,    // 答题延迟下限（秒）
         DELAY_ANSWER_MAX: 8,    // 答题延迟上限（秒）—— 0~0 表示关闭
         DELAY_NEXT_MIN: 1,      // 下一节延迟下限（秒）
@@ -610,7 +611,7 @@
             const head = [
                 '=== GXNUFL 刷课助手 · 网络日志（单独导出）===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.28.0',
+                '脚本版本: 3.29.0',
                 '页面: ' + location.href,
                 '当前域名: ' + location.hostname + '　（日志按域名隔离：跨子域不共享，完整记录请回到课程页导出）',
                 '记录条数: ' + nets.length + ' 条（所有标签页合并，页面重载后仍保留）',
@@ -642,7 +643,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.28.0',
+                '脚本版本: 3.29.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1780,6 +1781,7 @@
     // 递归统计资源树：总时长、已完成（studyTime >= totalTime * 80%）
     function computeZhsStat(list) {
         let total = 0, done = 0, count = 0, doneCount = 0;
+        let seq = 0;
         const map = {};
         (function walk(nodes) {
             (nodes || []).forEach(n => {
@@ -1790,7 +1792,8 @@
                     count++;
                     const isDone = zhsIsDoneSec(s, t);
                     if (isDone) { done += zhsNeedSec(t); doneCount++; }
-                    map[String(n.id)] = { t: t, s: s, done: isDone, name: String(n.name || '').trim() };
+                    // seq：服务端资源树的遍历顺序 = 侧边栏从上到下的列表顺序
+                    map[String(n.id)] = { t: t, s: s, done: isDone, name: String(n.name || '').trim(), seq: seq++ };
                 }
                 if (n.childList) walk(n.childList);
             });
@@ -2076,10 +2079,18 @@
             if (it.done) return;                    // 该数据里显示已完成
             if (zhsIsDoneLocal(id)) return;         // 本地已记录完成
             if (zhsIsRecentlyAssigned(id)) return;  // 近期已分配给其他窗口
-            list.push({ id: id, s: Number(it.s) || 0, t: it.t });
+            list.push({ id: id, s: Number(it.s) || 0, t: it.t, seq: Number(it.seq) || 0 });
         });
-        // 平台按"完成个数"计进度，且看满 80% 即完成 → 优先做最快达到 80% 的
-        list.sort((a, b) => (zhsNeedSec(a.t) - a.s) - (zhsNeedSec(b.t) - b.s));
+        // 切换顺序（设置里可选）
+        const order = state.NEXT_ORDER || 'fast';
+        if (order === 'list') {
+            list.sort((a, b) => a.seq - b.seq);                       // 侧边栏列表顺序（从上到下）
+        } else if (order === 'short') {
+            list.sort((a, b) => (a.t - b.t) || (a.seq - b.seq));      // 视频时长最短的优先
+        } else {
+            // 最快完成：看满 80% 即完成 → 按到 80% 还差多少升序
+            list.sort((a, b) => (zhsNeedSec(a.t) - a.s) - (zhsNeedSec(b.t) - b.s) || (a.seq - b.seq));
+        }
         return list;
     }
 
@@ -2095,16 +2106,19 @@
                 const it = zhsStat.map[(el.id || '').replace('file_', '')];
                 return it ? (Number(it.s) || 0) : 0;
             };
-            // 同上：按到 80% 还差多少升序（DOM 回退时用 studyTime 估算）
-            list.sort((a, b) => {
-                const ia = zhsStat && zhsStat.map ? zhsStat.map[(a.id || '').replace('file_', '')] : null;
-                const ib = zhsStat && zhsStat.map ? zhsStat.map[(b.id || '').replace('file_', '')] : null;
-                const ta = ia && ia.t ? ia.t : (Number(a.dataset.t) || 0);
-                const tb = ib && ib.t ? ib.t : (Number(b.dataset.t) || 0);
-                const sa = ia ? (Number(ia.s) || 0) : getS(a);
-                const sb = ib ? (Number(ib.s) || 0) : getS(b);
-                return (zhsNeedSec(ta) - sa) - (zhsNeedSec(tb) - sb);
-            });
+            const order = state.NEXT_ORDER || 'fast';
+            if (order !== 'list') {   // 'list' 就保持 DOM 顺序（本身就是侧边栏顺序）
+                list.sort((a, b) => {
+                    const ia = zhsStat && zhsStat.map ? zhsStat.map[(a.id || '').replace('file_', '')] : null;
+                    const ib = zhsStat && zhsStat.map ? zhsStat.map[(b.id || '').replace('file_', '')] : null;
+                    const ta = ia && ia.t ? ia.t : (Number(a.dataset.t) || 0);
+                    const tb = ib && ib.t ? ib.t : (Number(b.dataset.t) || 0);
+                    const sa = ia ? (Number(ia.s) || 0) : getS(a);
+                    const sb = ib ? (Number(ib.s) || 0) : getS(b);
+                    if (order === 'short') return ta - tb;                       // 短视频优先
+                    return (zhsNeedSec(ta) - sa) - (zhsNeedSec(tb) - sb);        // 最快完成
+                });
+            }
         }
         return list;
     }
@@ -2529,6 +2543,13 @@
 #gxnufl-panel .gx-num::-webkit-outer-spin-button,
 #gxnufl-panel .gx-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 #gxnufl-panel .gx-num:focus { border-color: rgba(46,204,113,0.65); }
+#gxnufl-panel .gx-sel {
+    background: rgba(255,255,255,0.1); color: #e8eaed;
+    border: 1px solid rgba(255,255,255,0.22); border-radius: 6px;
+    padding: 2px 3px; font-size: 11px; outline: none; max-width: 112px;
+}
+#gxnufl-panel .gx-sel:focus { border-color: rgba(46,204,113,0.65); }
+#gxnufl-panel .gx-sel option { background: #22252a; color: #e8eaed; }
 #gxnufl-panel .gx-btn-row { display: flex; gap: 6px; margin-top: 9px; }
 #gxnufl-panel .gx-jump {
     flex: 1 1 0; padding: 7px 0;
@@ -3104,6 +3125,25 @@
             saveState();
         });
         syncWrap.appendChild(syncSel);
+        // 切换顺序（自动下一节 / 多开窗口共用；仅智慧树有效）
+        if (IS_ZHS) {
+            const orderSel = document.createElement('select');
+            orderSel.className = 'gx-sel';
+            [['fast', '最快完成'], ['list', '侧边栏顺序'], ['short', '短视频优先']].forEach(pair => {
+                const o = document.createElement('option');
+                o.value = pair[0];
+                o.textContent = pair[1];
+                if ((state.NEXT_ORDER || 'fast') === pair[0]) o.selected = true;
+                orderSel.appendChild(o);
+            });
+            orderSel.addEventListener('change', () => {
+                state.NEXT_ORDER = orderSel.value;
+                saveState();
+                if (typeof renderZhsStat === 'function') renderZhsStat();
+            });
+            bodyBox.appendChild(makeRow('切换顺序', orderSel,
+                '自动下一节/多开窗口选哪个视频：最快完成=按到 80% 还差多少最少；侧边栏顺序=从上到下按列表；短视频优先=时长最短的先播'));
+        }
         bodyBox.appendChild(makeRow('窗口同步', syncWrap,
             '多窗口共享统计/心跳的间隔；越大越不容易互相干扰导致乱跳（默认 5 秒，可选 3 秒）'));
         bodyBox.appendChild(makeRow('答题延迟', makeDelayInputs('DELAY_ANSWER_MIN', 'DELAY_ANSWER_MAX'),
@@ -3314,7 +3354,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.28', state);
+        log('脚本已启动 v3.29', state);
         // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
         if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
             state.SAVE_DATA = false;
