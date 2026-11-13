@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.1
+// @version      3.16.2
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -29,7 +29,11 @@
                     if (/StuStudy|saveStuStudy/i.test(this.__gxUrl || '')) {
                         window.__gxStudyReq = { url: this.__gxUrl, method: this.__gxMethod, body: body, at: Date.now() };
                         window.__gxReportAt = Date.now();   // 最近一次上报时间（用于"卡住/掉登录"报警）
-                        console.log('%c[GXNUFL刷课] 捕获学习上报请求', 'color:#2ecc71;font-weight:bold', this.__gxUrl, body);
+                        // 日志队列（主逻辑会转存进日志缓冲；签名打码后再记录）
+                        (window.__gxHookLog = window.__gxHookLog || []).push(
+                            '捕获上报: ' + String(this.__gxUrl).replace(/signature=[^&]*/i, 'signature=***')
+                        );
+                        console.log('%c[GXNUFL刷课] 捕获学习上报请求', 'color:#2ecc71;font-weight:bold', this.__gxUrl);
                     }
                 } catch (e) {}
                 return XS.apply(this, arguments);
@@ -103,9 +107,56 @@
         try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
     }
 
-    const log = (...a) => console.log('%c[GXNUFL刷课]', 'color:#2ecc71;font-weight:bold', ...a);
+    // 日志：同时写入内存缓冲，供「导出日志」使用（平台有反调试，尽量不依赖 F12）
+    const LOG_MAX = 300;
+    const logBuffer = [];
+    const log = (...a) => {
+        try {
+            const line = new Date().toLocaleTimeString() + '  ' + a.map(x => {
+                if (typeof x === 'string') return x;
+                try { return JSON.stringify(x); } catch (e) { return String(x); }
+            }).join(' ');
+            logBuffer.push(line);
+            if (logBuffer.length > LOG_MAX) logBuffer.shift();
+        } catch (e) {}
+        console.log('%c[GXNUFL刷课]', 'color:#2ecc71;font-weight:bold', ...a);
+    };
     // document-start 时 jQuery 可能还没加载，start() 里会重新取
     let jq = window.jQuery || window.$;
+
+    // 导出运行日志（含环境信息、开关状态、最近 300 条事件）
+    function exportLog() {
+        try {
+            const env = [
+                '=== GXNUFL 刷课助手 · 运行日志 ===',
+                '导出时间: ' + new Date().toLocaleString(),
+                '脚本版本: 3.16.2',
+                '页面: ' + location.href,
+                '主机: ' + location.hostname,
+                'UA: ' + navigator.userAgent,
+                '窗口: ' + window.innerWidth + 'x' + window.innerHeight,
+                '开关: ' + JSON.stringify(state),
+                '多开窗口: ' + (IS_ZHS ? (zhsIsParallelWindow() ? '是' : '否') : '—'),
+                '资源统计: ' + (zhsStat ? (zhsStat.count + ' 个视频 / 总 ' + fmtDuration(zhsStat.total) + ' / 已完成 ' + zhsStat.doneCount + ' 个') : '未加载'),
+                '最近上报: ' + (window.__gxReportAt ? new Date(window.__gxReportAt).toLocaleString() : '无'),
+                '--- 日志 ---',
+            ].join('\n');
+            const text = env + '\n' + (logBuffer.length ? logBuffer.join('\n') : '（暂无日志）');
+            const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+            const a = document.createElement('a');
+            const d = new Date();
+            const p2 = n => String(n).padStart(2, '0');
+            a.download = 'gxnufl-log-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate())
+                + '-' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds()) + '.txt';
+            a.href = URL.createObjectURL(blob);
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 3000);
+            setStatus('日志已导出（浏览器下载 txt）', 'ok');
+        } catch (e) {
+            setStatus('日志导出失败：' + e.message, 'warn');
+        }
+    }
 
     // ===================== 随机延迟 =====================
     // 读取区间配置（秒）返回随机毫秒；上限 <=0 视为关闭（返回 0 不等待）
@@ -1685,6 +1736,13 @@
     font-size: 11px; line-height: 1.55;
 }
 #gxnufl-panel .gx-stat b { color: #9cc0ff; font-weight: 600; }
+#gxnufl-panel .gx-log {
+    width: 100%; margin-top: 6px; padding: 5px 0;
+    background: rgba(255,255,255,0.06); color: #b8bcc4;
+    border: 1px solid rgba(255,255,255,0.16); border-radius: 7px;
+    cursor: pointer; font-size: 11.5px; font-family: inherit;
+}
+#gxnufl-panel .gx-log:hover { background: rgba(255,255,255,0.12); color: #e8eaed; }
 #gxnufl-panel .gx-foot { margin-top: 7px; font-size: 10.5px; color: #8a8f98; text-align: center; }
         `;
         const style = document.createElement('style');
@@ -2104,6 +2162,15 @@
         if (elZhsStat) elPanel.appendChild(elZhsStat);
         elPanel.appendChild(bodyBox);
         elPanel.appendChild(btnRow);
+
+        // 导出日志（排查问题用；平台有反调试，不依赖 F12）
+        const logBtn = document.createElement('button');
+        logBtn.className = 'gx-log';
+        logBtn.textContent = '导出日志';
+        logBtn.title = '下载运行日志（环境信息 + 开关状态 + 最近 300 条事件）';
+        logBtn.addEventListener('click', exportLog);
+        elPanel.appendChild(logBtn);
+
         elPanel.appendChild(foot);
         document.body.appendChild(elPanel);
 
@@ -2133,6 +2200,10 @@
     // ===================== 主循环 =====================
     function tick() {
         bindVideo();
+        // 转存 hook 捕获的上报日志（进内存缓冲，导出日志时可见）
+        if (window.__gxHookLog && window.__gxHookLog.length) {
+            try { window.__gxHookLog.splice(0).forEach(l => log(l)); } catch (e) {}
+        }
         // 智慧树：把本地完成状态同步到资源树（✓ 即时显示）并补齐时长标注，2 秒一次
         if (IS_ZHS && Date.now() - lastZhsSyncAt > 2000) {
             lastZhsSyncAt = Date.now();
