@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.0
+// @version      3.16.1
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -28,6 +28,7 @@
                 try {
                     if (/StuStudy|saveStuStudy/i.test(this.__gxUrl || '')) {
                         window.__gxStudyReq = { url: this.__gxUrl, method: this.__gxMethod, body: body, at: Date.now() };
+                        window.__gxReportAt = Date.now();   // 最近一次上报时间（用于"卡住/掉登录"报警）
                         console.log('%c[GXNUFL刷课] 捕获学习上报请求', 'color:#2ecc71;font-weight:bold', this.__gxUrl, body);
                     }
                 } catch (e) {}
@@ -2177,7 +2178,18 @@
         if (!v) {
             setStatus('等待视频加载…', 'off');
         } else if (IS_ZHS) {
-            setStatus(document.hidden ? '智慧树模式 · 后台保活中' : '智慧树模式 · 自动刷资源中', 'ok');
+            // 上报空闲报警：超过 5 分钟没有上报 → 可能是掉登录/页面被休眠/播放器卡住
+            const lastReport = Number(window.__gxReportAt) || 0;
+            const refAt = lastReport || START_AT;
+            const idleMin = (Date.now() - refAt) / 60000;
+            if (idleMin > 5) {
+                setStatus('⚠️ 已 ' + Math.round(idleMin) + ' 分钟无进度上报：可能掉登录 / 页面被休眠 / 播放器卡住', 'warn');
+            } else if (lastReport && Date.now() - lastReport < 2 * 60000) {
+                setStatus(document.hidden ? '智慧树模式 · 后台运行中（' + Math.round((Date.now() - lastReport) / 1000) + ' 秒前上报）'
+                    : '智慧树模式 · 自动刷资源中', 'ok');
+            } else {
+                setStatus(document.hidden ? '智慧树模式 · 后台运行中' : '智慧树模式 · 自动刷资源中', 'ok');
+            }
         } else if (!state.AUTO_NEXT && !state.AUTO_ANSWER && !state.AUTO_PLAY) {
             setStatus('全部功能已关闭', 'off');
         } else {
