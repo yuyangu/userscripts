@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.17.1
+// @version      3.18.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -181,7 +181,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.17.1',
+                '脚本版本: 3.18.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1363,23 +1363,40 @@
             }
         });
         const remain = Math.max(0, total - done);
+        // 下一个待播视频（方便核对切换逻辑）
+        let nextTxt = '全部完成';
+        try {
+            const pend = zhsPendingIds();
+            if (pend.length) {
+                const it = zhsStat.map[pend[0].id];
+                const nm = (it && it.name) ? it.name : ('#' + pend[0].id);
+                const pct = (it && it.t) ? Math.round((Number(it.s) || 0) / it.t * 100) : 0;
+                nextTxt = (nm.length > 15 ? nm.slice(0, 15) + '…' : nm) + '（' + pct + '%）';
+            }
+        } catch (e) {}
         elZhsStat.innerHTML =
             '<div>资源总时长 <b>' + fmtDuration(total) + '</b>（' + count + ' 个视频）</div>' +
-            '<div>已完成 ' + doneCount + ' 个 · 剩余 <b>' + fmtDuration(remain) + '</b></div>';
+            '<div>已完成 ' + doneCount + ' 个 · 剩余 <b>' + fmtDuration(remain) + '</b></div>' +
+            '<div>下一个：' + nextTxt + '</div>';
     }
 
-    // 当前视频在服务端已完成 → 自动切到下一个未完成资源（避免手动点开已完成视频后白播）
+    // 当前视频在服务端已完成（或侧边栏已显示 ✓）→ 自动切到下一个未完成资源
     let lastSkipCheckAt = 0;
     function zhsSkipIfDone() {
         if (!IS_ZHS || !zhsStat || !zhsStat.map) return;
         if (Date.now() - lastSkipCheckAt < 5000) return;
         lastSkipCheckAt = Date.now();
         const fid = zhsCurrentFileId();
+        if (!fid) return;
         const it = zhsStat.map[fid];
-        if (!it || !it.done) return;
+        // 两个条件任一满足即视为完成：①服务端学习时长达到视频时长 ②侧边栏出现 ✓
+        const serverDone = !!(it && it.done);
+        const el = document.getElementById('file_' + fid);
+        const domDone = !!(el && el.querySelector('.status-box .icon-finish'));
+        if (!serverDone && !domDone) return;
         const pend = zhsPendingIds();
         if (!pend.length) return;
-        log('当前视频已完成（服务端），自动切换到下一个未完成资源:', pend[0].id);
+        log('当前视频已完成（' + (serverDone ? '服务端时长已满' : '侧边栏 ✓') + '），自动切换到下一个未完成资源:', pend[0].id);
         zhsMarkAssigned(pend[0].id);
         zhsSwitchById(pend[0].id);
     }
@@ -1388,7 +1405,7 @@
     let lastStatRefreshAt = 0;
     function zhsRefreshStatsIfStale() {
         if (!IS_ZHS || !zhsStat) return;
-        if (Date.now() - lastStatRefreshAt < 5 * 60 * 1000) return;
+        if (Date.now() - lastStatRefreshAt < 60 * 1000) return;
         lastStatRefreshAt = Date.now();
         fetchZhsStats();
     }
@@ -1523,11 +1540,8 @@
             if (zhsIsRecentlyAssigned(id)) return;  // 近期已分配给其他窗口
             list.push({ id: id, s: Number(it.s) || 0, t: it.t });
         });
-        // 有进度的优先，进度大的优先（快完成的先刷完）
-        list.sort((a, b) => {
-            if ((a.s > 0) !== (b.s > 0)) return a.s > 0 ? -1 : 1;
-            return b.s - a.s;
-        });
+        // 进度小的优先（先刷没看过的，避免总在啃半截的）
+        list.sort((a, b) => a.s - b.s);
         return list;
     }
 
@@ -1543,11 +1557,7 @@
                 const it = zhsStat.map[(el.id || '').replace('file_', '')];
                 return it ? (Number(it.s) || 0) : 0;
             };
-            list.sort((a, b) => {
-                const sa = getS(a), sb = getS(b);
-                if ((sa > 0) !== (sb > 0)) return sa > 0 ? -1 : 1;
-                return sb - sa;
-            });
+            list.sort((a, b) => getS(a) - getS(b));   // 进度小的优先
         }
         return list;
     }
@@ -1796,10 +1806,21 @@
         v.dataset.gxnuflBound = '1';
         v.addEventListener('ended', () => {
             if (IS_ZHS) {
-                // 多开窗口：播完自动关闭自己（避免多个窗口切到同一个资源）
+                // 先看服务端完成度：只差一点就补播最后 30 秒（把学习时长补满），避免整段重刷
+                const it = (zhsStat && zhsStat.map) ? zhsStat.map[zhsCurrentFileId()] : null;
+                const pct = (it && it.t) ? (Number(it.s) || 0) / it.t : 1;
+                const bufCnt = Number(v.dataset.gxBuf || 0);
+                if (pct >= 0.95 && pct < 1 && bufCnt < 3) {
+                    v.dataset.gxBuf = String(bufCnt + 1);
+                    log('服务端还差 ' + Math.round((1 - pct) * 100) + '%，补播最后 30 秒补足（第 ' + (bufCnt + 1) + ' 次）');
+                    try {
+                        v.currentTime = Math.max(0, (v.duration || 0) - 30);
+                        v.play();
+                    } catch (e) {}
+                    return;
+                }
+                // 多开窗口：不受「自动下一节」开关控制，总是继续下一个
                 if (zhsIsParallelWindow()) {
-                    // 不再写本地完成记录（不可靠）：是否完成以服务端 studyTime 为准
-                    // 不关闭窗口，继续播下一个未完成资源（相当于一个后台刷课进程）
                     log('多开窗口：本资源播完 → 自动切换下一个');
                     scheduleZhsNext();
                     return;
