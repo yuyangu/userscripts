@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.4
+// @version      3.16.5
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -133,7 +133,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.16.3',
+                '脚本版本: 3.16.5',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1031,7 +1031,9 @@
         return (Date.now() - info.at) < winMs;
     }
     function zhsIsDoneLocal(id) {
-        return !!(id && readJsonMap(ZHS_DONE_KEY)[id]);
+        // 【已废弃】本地"完成"标记不可靠（虚拟播放会在未上报时也触发 ended → 误标完成）。
+        // 现在统一以服务端 studyTime >= totalTime 为准，不再使用本地记录。
+        return false;
     }
     // 该资源是否"还值得播"：DOM 未完成 + 本地未完成 + 非近期已分配
     function zhsIsUsable(el) {
@@ -1042,16 +1044,20 @@
         if (zhsIsRecentlyAssigned(id)) return false;
         return true;
     }
-    // 把本地"已完成"同步到资源树 DOM（让 ✓ 图标即时显示）
-    function zhsSyncDoneToDom() {
-        const done = readJsonMap(ZHS_DONE_KEY);
-        Object.keys(done).forEach(id => {
+    // 清理旧版本误标的"本地完成"（虚拟播放未上报时误打 ✓），恢复为服务端真实状态
+    function clearFalseLocalDone() {
+        let m = {};
+        try { m = JSON.parse(localStorage.getItem(ZHS_DONE_KEY) || '{}'); } catch (e) { return; }
+        const ids = Object.keys(m);
+        if (!ids.length) return;
+        ids.forEach(id => {
             const el = document.querySelector('#sourceTree .file-item#file_' + id);
-            if (el && !zhsIsDone(el)) {
-                const box = el.querySelector('.status-box');
-                if (box) box.innerHTML = '<i class="icon-finish"></i>';
-            }
+            if (!el) return;
+            const box = el.querySelector('.status-box');
+            if (box) box.innerHTML = '';   // 清掉脚本打上的 ✓（刷新页面会恢复服务端真实状态）
         });
+        try { localStorage.removeItem(ZHS_DONE_KEY); } catch (e) {}
+        log('已清理 ' + ids.length + ' 个本地误标完成记录（刷新页面显示服务端真实状态）');
     }
 
     // 秒数 → 时钟格式（mm:ss / h:mm:ss）
@@ -1618,7 +1624,7 @@
             if (IS_ZHS) {
                 // 多开窗口：播完自动关闭自己（避免多个窗口切到同一个资源）
                 if (zhsIsParallelWindow()) {
-                    zhsMarkDoneLocal(zhsCurrentFileId());   // 记录已完成（主窗口资源树会同步 ✓）
+                    // 不再写本地完成记录（不可靠）：是否完成以服务端 studyTime 为准
                     // 不关闭窗口，继续播下一个未完成资源（相当于一个后台刷课进程）
                     log('多开窗口：本资源播完 → 自动切换下一个');
                     scheduleZhsNext();
@@ -2240,7 +2246,6 @@
         // 智慧树：把本地完成状态同步到资源树（✓ 即时显示）并补齐时长标注，2 秒一次
         if (IS_ZHS && Date.now() - lastZhsSyncAt > 2000) {
             lastZhsSyncAt = Date.now();
-            zhsSyncDoneToDom();
             zhsDecorateDurations();
             selfCheckSaveMode();
             // 多开窗口心跳 + 按钮上显示当前活跃窗口数
@@ -2333,6 +2338,7 @@
         if (IS_ZHS) {
             if (/^wenda\./i.test(location.hostname)) document.body.classList.add('gx-zhs-source');
             setTimeout(fetchZhsStats, 2000);
+            setTimeout(clearFalseLocalDone, 3500);   // 清理旧版本误标的完成记录
         }
         setInterval(tick, FIXED.POLL_MS);
         // 倍速管理用更高频检查（100ms），保证高倍速下能及时在题目点减速
