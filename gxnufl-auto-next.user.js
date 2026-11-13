@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.20.0
+// @version      3.21.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -131,6 +131,7 @@
         SAVE_DATA: false,       // 省流量模式（默认关：不下载视频、虚拟推进；需要时手动开）
         MULTI_WIN: false,       // 智慧树：多开用独立窗口（默认关 → 后台标签页）
         KEEP_ALIVE: false,      // 后台保活（超声波防标签页休眠，默认关）
+        SYNC_SEC: 5,            // 多窗口信息同步间隔（秒）：3 / 5，越大越不易互相干扰
         DELAY_ANSWER_MIN: 2,    // 答题延迟下限（秒）
         DELAY_ANSWER_MAX: 8,    // 答题延迟上限（秒）—— 0~0 表示关闭
         DELAY_NEXT_MIN: 1,      // 下一节延迟下限（秒）
@@ -197,7 +198,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.20.0',
+                '脚本版本: 3.21.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1278,9 +1279,13 @@
     // 统计缓存（跨窗口共享）：让所有多开窗口用同一份"完成状态"，避免算出同一个下一个
     const ZHS_STAT_KEY = 'gxnufl_zhs_stat';
 
+    let lastStatWriteAt = 0;
     function saveZhsStat() {
         try {
             if (!zhsStat) return;
+            // 多窗口同步节流：SYNC_SEC 内不重复写共享缓存，避免互相触发 storage 风暴
+            if (Date.now() - lastStatWriteAt < (Number(state.SYNC_SEC) || 5) * 1000) return;
+            lastStatWriteAt = Date.now();
             localStorage.setItem(ZHS_STAT_KEY, JSON.stringify({
                 total: zhsStat.total, done: zhsStat.done, count: zhsStat.count,
                 doneCount: zhsStat.doneCount, map: zhsStat.map, fetchedAt: zhsStat.fetchedAt
@@ -1422,39 +1427,55 @@
     }
 
     // 当前视频在服务端已完成（或侧边栏已显示 ✓）→ 自动切到下一个未完成资源
-    let lastSkipCheckAt = 0;
-    function zhsSkipIfDone() {
-        if (!IS_ZHS || !zhsStat || !zhsStat.map) return;
-        if (Date.now() - lastSkipCheckAt < 3000) return;
-        lastSkipCheckAt = Date.now();
-        const fid = zhsCurrentFileId();
-        if (!fid) return;
-        const it = zhsStat.map[fid];
+    // 只依据"服务器实时返回的当前视频学习时长"判断是否完成，不依赖本地缓存/DOM ✓
+    // 每次判定都实时请求服务器资源树，用返回的 studyTime >= totalTime 判定；
+    // 判定完成与选下一个，全部使用同一份服务器数据（serverStat），不读 zhsStat 缓存
+    const ZHSSWITCH_KEY = 'gxnufl_last_switch_at';
+    let lastDoneQueryAt = 0;
+    let doneQueryPending = false;
 
-        // ①最近一次上报响应里的 rt（服务端累计学习时长，最快最准）
-        let rtDone = false, rtVal = -1;
-        const rp = window.__gxRt;
-        if (rp && rp.fileId === fid && (Date.now() - rp.at) < 120000 && it && it.t) {
-            rtVal = rp.rt;
-            rtDone = rp.rt >= it.t;
-        }
-        // ②统计快照里的完成标记
-        const serverDone = !!(it && it.done);
-        // ③侧边栏 ✓
-        const el = document.getElementById('file_' + fid);
-        const domDone = !!(el && el.querySelector('.status-box .icon-finish'));
-
-        if (!rtDone && !serverDone && !domDone) return;
-        const pend = zhsPendingIds();
+    function zhsDoSwitch(why, serverStat) {
+        const pend = zhsPendingIds(serverStat);   // 用服务器数据选下一个
         if (!pend.length) return;
-        const why = rtDone ? ('服务端 rt=' + rtVal + '/' + it.t)
-            : (serverDone ? '统计已完成' : '侧边栏 ✓');
-        log('当前视频已完成（' + why + '），自动切换到下一个未完成资源:', pend[0].id);
+        try { sessionStorage.setItem(ZHSSWITCH_KEY, String(Date.now())); } catch (e) {}
+        log('当前视频已完成（' + why + '），自动切换到下一个:', pend[0].id);
         zhsMarkAssigned(pend[0].id);
         zhsSwitchById(pend[0].id);
     }
 
-    // 统计定时刷新（每 5 分钟，确保"已完成"判断不过期）
+    function zhsSkipIfDone() {
+        if (!IS_ZHS) return;
+        // 刚切换过来 N 秒内不判定（等页面/播放/URL 稳定，避免连锁跳）
+        let lastSw = 0;
+        try { lastSw = Number(sessionStorage.getItem(ZHSSWITCH_KEY)) || 0; } catch (e) {}
+        if (Date.now() - lastSw < 6000) return;
+        if (doneQueryPending || Date.now() - lastDoneQueryAt < 8000) return;
+
+        const fid = zhsCurrentFileId();
+        const cid = zhsCourseId();
+        if (!fid || !cid || !jq || !jq.ajax) return;
+
+        doneQueryPending = true;
+        lastDoneQueryAt = Date.now();
+        jq.ajax({
+            url: '//studyResources.zhihuishu.com/studyResources/stuResouce/queryResourceMenuTree',
+            data: { courseId: cid },
+            dataType: 'jsonp',
+            timeout: 8000,
+            success: (res) => {
+                doneQueryPending = false;
+                const list = (res && (res.rt || res.data)) || [];
+                if (!Array.isArray(list)) return;
+                const serverStat = computeZhsStat(list);   // 服务器实时数据
+                const it = serverStat.map[fid];
+                if (it && it.t && Number(it.s) >= it.t) {
+                    zhsDoSwitch('服务器 studyTime=' + it.s + '/' + it.t, serverStat);
+                }
+            },
+            error: () => { doneQueryPending = false; },
+        });
+    }
+    // 统计定时刷新（每 60 秒，仅供面板显示/排序用；不参与"完成"判定）
     let lastStatRefreshAt = 0;
     function zhsRefreshStatsIfStale() {
         if (!IS_ZHS || !zhsStat) return;
@@ -1580,15 +1601,17 @@
     }
 
     // 【优先】从服务端资源树数据里选可播视频：不依赖 DOM，折叠章节里的视频也能选到
-    function zhsPendingIds() {
-        if (!zhsStat || !zhsStat.map) return [];
+    // statOverride：切换链路传入"服务器实时数据"，避免依赖本地缓存判断完成
+    function zhsPendingIds(statOverride) {
+        const stat = statOverride || zhsStat;
+        if (!stat || !stat.map) return [];
         const curId = zhsCurrentFileId();
         const list = [];
-        Object.keys(zhsStat.map).forEach(id => {
-            const it = zhsStat.map[id];
+        Object.keys(stat.map).forEach(id => {
+            const it = stat.map[id];
             if (!it || !it.t) return;
             if (id === curId) return;
-            if (it.done) return;                    // 服务端已完成
+            if (it.done) return;                    // 该数据里显示已完成
             if (zhsIsDoneLocal(id)) return;         // 本地已记录完成
             if (zhsIsRecentlyAssigned(id)) return;  // 近期已分配给其他窗口
             list.push({ id: id, s: Number(it.s) || 0, t: it.t });
@@ -2405,6 +2428,25 @@
             if (on) startKeepAlive();
         }),
             '用超声波让页面保持"有声"活跃状态，防止浏览器休眠后台标签页导致刷课中断（默认关）'));
+        // 多窗口信息同步间隔（3/5 秒）
+        const syncWrap = document.createElement('span');
+        syncWrap.className = 'gx-range';
+        const syncSel = document.createElement('select');
+        syncSel.className = 'gx-num';
+        [3, 5, 8].forEach(v => {
+            const o = document.createElement('option');
+            o.value = String(v);
+            o.textContent = v + ' 秒';
+            if (Number(state.SYNC_SEC) === v) o.selected = true;
+            syncSel.appendChild(o);
+        });
+        syncSel.addEventListener('change', () => {
+            state.SYNC_SEC = parseInt(syncSel.value, 10) || 5;
+            saveState();
+        });
+        syncWrap.appendChild(syncSel);
+        bodyBox.appendChild(makeRow('窗口同步', syncWrap,
+            '多窗口共享统计/心跳的间隔；越大越不容易互相干扰导致乱跳（默认 5 秒，可选 3 秒）'));
         bodyBox.appendChild(makeRow('答题延迟', makeDelayInputs('DELAY_ANSWER_MIN', 'DELAY_ANSWER_MAX'),
             '弹题后等待的随机秒数（模仿真人审题）；0~0 表示立即作答'));
         bodyBox.appendChild(makeRow('下一节延迟', makeDelayInputs('DELAY_NEXT_MIN', 'DELAY_NEXT_MAX'),
@@ -2624,8 +2666,11 @@
             }
             setTimeout(fetchZhsStats, 2000);
             // 其他窗口更新统计时实时同步
+            let lastStatSyncAt = 0;
             window.addEventListener('storage', (e) => {
                 if (e.key !== ZHS_STAT_KEY || !e.newValue) return;
+                if (Date.now() - lastStatSyncAt < (Number(state.SYNC_SEC) || 5) * 1000) return;
+                lastStatSyncAt = Date.now();
                 try {
                     const o = JSON.parse(e.newValue);
                     if (!o || !o.map) return;
