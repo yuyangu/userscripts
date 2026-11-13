@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.6
+// @version      3.16.7
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -133,7 +133,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.16.6',
+                '脚本版本: 3.16.7',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1021,14 +1021,14 @@
         if (typeof v === 'number') return { at: v, dur: 0 };   // 兼容旧格式
         return { at: Number(v.at) || 0, dur: Number(v.dur) || 0 };
     }
-    // "已分配"有效期 = 该视频时长 + 10 分钟缓冲：
-    // 窗口正常播完即过期；用户手动关窗后也能较快释放，避免一直跳过未看过的视频
+    // "资源已被占用"判定：①别的活跃窗口正在播它 ②刚分配给新窗口（3 分钟内）
+    // 不再用"视频时长 + 10 分钟"的长有效期（那会把视频锁死几十分钟 → 表现为"总是被跳过"）
     function zhsIsRecentlyAssigned(id) {
         if (!id) return false;
+        if (zhsIsPlayingElsewhere(id)) return true;
         const info = zhsAssignedInfo(id);
         if (!info || !info.at) return false;
-        const winMs = (info.dur > 0 ? info.dur + 600 : 2 * 3600) * 1000;
-        return (Date.now() - info.at) < winMs;
+        return (Date.now() - info.at) < 3 * 60 * 1000;
     }
     function zhsIsDoneLocal(id) {
         // 【已废弃】本地"完成"标记不可靠（虚拟播放会在未上报时也触发 ended → 误标完成）。
@@ -1044,8 +1044,10 @@
         if (zhsIsRecentlyAssigned(id)) return false;
         return true;
     }
-    // 清理旧版本误标的"本地完成"（虚拟播放未上报时误打 ✓），恢复为服务端真实状态
+    // 清理旧版本留下的错误状态：误标的"本地完成" + 长期占用的"分配记录"
     function clearFalseLocalDone() {
+        // 旧版"分配记录"有效期长达数十分钟，会把视频锁死 → 直接清空
+        try { localStorage.removeItem(ZHS_ASSIGN_KEY); } catch (e) {}
         let m = {};
         try { m = JSON.parse(localStorage.getItem(ZHS_DONE_KEY) || '{}'); } catch (e) { return; }
         const ids = Object.keys(m);
@@ -1456,11 +1458,30 @@
         try {
             const m = readJsonMap(ZHS_WINS_KEY);
             const now = Date.now();
-            m[WIN_ID] = now;
+            // 心跳里带上"当前正在播的 fileId"，用于精确判断资源是否已被别的窗口占用
+            m[WIN_ID] = { at: now, fid: zhsCurrentFileId() || '' };
             // 清掉 3 分钟没有心跳的（窗口已关闭）
-            Object.keys(m).forEach(k => { if (now - m[k] > 180000) delete m[k]; });
+            Object.keys(m).forEach(k => {
+                const v = m[k];
+                const at = v && typeof v === 'object' ? Number(v.at) || 0 : Number(v) || 0;
+                if (now - at > 180000) delete m[k];
+            });
             writeJsonMap(ZHS_WINS_KEY, m);
         } catch (e) {}
+    }
+
+    // 是否有其他活跃窗口正在播放该资源（心跳里 fid 匹配）
+    function zhsIsPlayingElsewhere(id) {
+        if (!id) return false;
+        const m = readJsonMap(ZHS_WINS_KEY);
+        const now = Date.now();
+        return Object.keys(m).some(k => {
+            if (k === WIN_ID) return false;   // 自己不算
+            const v = m[k];
+            if (!v || typeof v !== 'object') return false;
+            if (now - (Number(v.at) || 0) > 180000) return false;
+            return String(v.fid) === String(id);
+        });
     }
 
     // 当前活跃的多开窗口数（最近 3 分钟内还有心跳的）
@@ -1469,7 +1490,9 @@
         const now = Date.now();
         let n = 0;
         Object.keys(m).forEach(k => {
-            if (now - m[k] <= 180000) n++;
+            const v = m[k];
+            const at = v && typeof v === 'object' ? Number(v.at) || 0 : Number(v) || 0;
+            if (now - at <= 180000) n++;
             else delete m[k];
         });
         try { writeJsonMap(ZHS_WINS_KEY, m); } catch (e) {}
