@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.19.0
+// @version      3.20.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -197,7 +197,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.19.0',
+                '脚本版本: 3.20.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1411,14 +1411,14 @@
             if (pend.length) {
                 const it = zhsStat.map[pend[0].id];
                 const nm = (it && it.name) ? it.name : ('#' + pend[0].id);
-                const pct = (it && it.t) ? Math.round((Number(it.s) || 0) / it.t * 100) : 0;
-                nextTxt = (nm.length > 15 ? nm.slice(0, 15) + '…' : nm) + '（' + pct + '%）';
+                const remainSec = it && it.t ? Math.max(0, it.t - (Number(it.s) || 0)) : 0;
+                nextTxt = (nm.length > 14 ? nm.slice(0, 14) + '…' : nm) + '（还差 ' + fmtDuration(remainSec) + '）';
             }
         } catch (e) {}
         elZhsStat.innerHTML =
             '<div>资源总时长 <b>' + fmtDuration(total) + '</b>（' + count + ' 个视频）</div>' +
-            '<div>已完成 ' + doneCount + ' 个 · 剩余 <b>' + fmtDuration(remain) + '</b></div>' +
-            '<div>下一个：' + nextTxt + '</div>';
+            '<div>已完成 <b>' + doneCount + '</b> / ' + count + ' 个（平台按个数算进度）</div>' +
+            '<div>剩余时长 ' + fmtDuration(remain) + ' · 下一个：' + nextTxt + '</div>';
     }
 
     // 当前视频在服务端已完成（或侧边栏已显示 ✓）→ 自动切到下一个未完成资源
@@ -1593,8 +1593,9 @@
             if (zhsIsRecentlyAssigned(id)) return;  // 近期已分配给其他窗口
             list.push({ id: id, s: Number(it.s) || 0, t: it.t });
         });
-        // 进度小的优先（先刷没看过的，避免总在啃半截的）
-        list.sort((a, b) => a.s - b.s);
+        // 平台学习进度按完成视频个数计算（不按时长）→ 优先做能最快完成的：
+        // 已看了一点的排前面，且剩余时长越短越优先（看完一个就 +1）
+        list.sort((a, b) => (a.t - a.s) - (b.t - b.s));
         return list;
     }
 
@@ -1610,7 +1611,16 @@
                 const it = zhsStat.map[(el.id || '').replace('file_', '')];
                 return it ? (Number(it.s) || 0) : 0;
             };
-            list.sort((a, b) => getS(a) - getS(b));   // 进度小的优先
+            // 同上：按剩余时长升序（DOM 回退时用 studyTime 估算）
+            list.sort((a, b) => {
+                const ia = zhsStat && zhsStat.map ? zhsStat.map[(a.id || '').replace('file_', '')] : null;
+                const ib = zhsStat && zhsStat.map ? zhsStat.map[(b.id || '').replace('file_', '')] : null;
+                const ta = ia && ia.t ? ia.t : (Number(a.dataset.t) || 0);
+                const tb = ib && ib.t ? ib.t : (Number(b.dataset.t) || 0);
+                const sa = ia ? (Number(ia.s) || 0) : getS(a);
+                const sb = ib ? (Number(ib.s) || 0) : getS(b);
+                return (ta - sa) - (tb - sb);
+            });
         }
         return list;
     }
