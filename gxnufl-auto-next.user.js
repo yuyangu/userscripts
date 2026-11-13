@@ -1752,12 +1752,26 @@
         return sec + '秒';
     }
 
-    // 智慧树：学习时长达到视频时长的 80% 即算"已完成"（平台口径）
+    // ===== 智慧树「完成」判定依据（抓包 newSourceLearning.js 原文）=====
+    //   switchProgress(e): progress = getProgress(e);
+    //                      if (progress >= 80) return '<i class="icon-finish"></i>';  // 右侧打勾
+    //   getProgress(e)   : Math.floor(studyTime * 1000 / totalTime / 10)
+    //                      = floor(累计学习时长 / 视频总时长 × 100)
+    // 注意：是"累计学习时长"的百分比，不是播放进度条；所以倍速不会加速。
+    // 另：页面还有 findFileStudyStatusByFileIds 接口（rt[fileId]==1）也会打勾，属服务端成绩状态。
     const ZHS_DONE_RATIO = 0.8;
+    function zhsProgressPct(s, t) {
+        const tt = Number(t) || 0;
+        if (tt <= 0) return 0;
+        const sv = Number(s) || 0;
+        let per = Math.floor(sv * 100 / tt);
+        if (per > 100) per = 100;
+        else if (per === 0 && sv > 0) per = 1;
+        return per;
+    }
     function zhsNeedSec(t) { return Math.ceil((Number(t) || 0) * ZHS_DONE_RATIO); }
     function zhsIsDoneSec(s, t) {
-        const tt = Number(t) || 0;
-        return tt > 0 && (Number(s) || 0) >= zhsNeedSec(tt);
+        return (Number(t) || 0) > 0 && zhsProgressPct(s, t) >= 80;   // 复刻页面判定
     }
 
     // 递归统计资源树：总时长、已完成（studyTime >= totalTime * 80%）
@@ -1864,7 +1878,7 @@
         } catch (e) {}
         elZhsStat.innerHTML =
             '<div>资源总时长 <b>' + fmtDuration(total) + '</b>（' + count + ' 个视频）</div>' +
-            '<div>已完成 <b>' + doneCount + '</b> / ' + count + ' 个（看满 80% 即完成）</div>' +
+            '<div>已完成 <b>' + doneCount + '</b> / ' + count + ' 个（学习时长达 80% 即完成）</div>' +
             '<div>剩余时长 ' + fmtDuration(remain) + ' · 下一个：' + nextTxt + '</div>';
     }
 
@@ -1911,7 +1925,7 @@
                 const serverStat = computeZhsStat(list);   // 服务器实时数据
                 const it = serverStat.map[fid];
                 if (it && it.t && zhsIsDoneSec(it.s, it.t)) {
-                    zhsDoSwitch('服务器 studyTime=' + it.s + '/' + zhsNeedSec(it.t) + '(80%)', serverStat);
+                    zhsDoSwitch('服务器学习时长 ' + zhsProgressPct(it.s, it.t) + '% (≥80% 完成)', serverStat);
                 }
             },
             error: () => { doneQueryPending = false; },
