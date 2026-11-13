@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.16.2
+// @version      3.16.3
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -103,6 +103,9 @@
         }
         delete state[o];
     });
+    // 清理已废弃的配置项（旧版本残留，如已合并掉的 PARALLEL）
+    delete state.PARALLEL;
+
     function saveState() {
         try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
     }
@@ -130,7 +133,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.16.2',
+                '脚本版本: 3.16.3',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -1407,9 +1410,38 @@
         return list;
     }
 
-    // 是否"多开"窗口（URL 带 gxParallel=1）——播完自动关闭，避免多个窗口互相抢资源
+    // 是否"多开"窗口（URL 带 gxParallel=1）——播完会继续切下一个资源
     function zhsIsParallelWindow() {
         return /[?&]gxParallel=1/.test(location.search);
+    }
+
+    // 本窗口标识 + 心跳（统计"当前有几个多开窗口在跑"）
+    const ZHS_WINS_KEY = 'gxnufl_zhs_wins';
+    const WIN_ID = Math.random().toString(36).slice(2, 8);
+
+    function zhsWinHeartbeat() {
+        if (!zhsIsParallelWindow()) return;
+        try {
+            const m = readJsonMap(ZHS_WINS_KEY);
+            const now = Date.now();
+            m[WIN_ID] = now;
+            // 清掉 3 分钟没有心跳的（窗口已关闭）
+            Object.keys(m).forEach(k => { if (now - m[k] > 180000) delete m[k]; });
+            writeJsonMap(ZHS_WINS_KEY, m);
+        } catch (e) {}
+    }
+
+    // 当前活跃的多开窗口数（最近 3 分钟内还有心跳的）
+    function zhsActiveWindows() {
+        const m = readJsonMap(ZHS_WINS_KEY);
+        const now = Date.now();
+        let n = 0;
+        Object.keys(m).forEach(k => {
+            if (now - m[k] <= 180000) n++;
+            else delete m[k];
+        });
+        try { writeJsonMap(ZHS_WINS_KEY, m); } catch (e) {}
+        return n;
     }
 
     // 「多开窗口」每次打开的数量（1 个；需要更多就重复点击）
@@ -1600,7 +1632,7 @@
     }
 
     // ===================== 右下角设置面板 =====================
-    let elPanel = null, elPill = null, elStatus = null, elPillDot = null;
+    let elPanel = null, elPill = null, elStatus = null, elPillDot = null, elParBtn = null;
 
     const LEVEL_COLORS = { ok: '#2ecc71', busy: '#f0b429', warn: '#e05252', off: '#8a8f98' };
 
@@ -2136,6 +2168,7 @@
             parBtn.textContent = '多开窗口';
             parBtn.title = '每次打开 ' + MULTI_COUNT + ' 个窗口（或标签页），自动播放未完成资源（优先未看完的）；播完自动切下一个，可重复点击开更多';
             parBtn.addEventListener('click', () => openParallelWindows());
+            elParBtn = parBtn;
         }
 
         // 智慧树模式：隐藏不适用的功能行
@@ -2210,6 +2243,13 @@
             zhsSyncDoneToDom();
             zhsDecorateDurations();
             selfCheckSaveMode();
+            // 多开窗口心跳 + 按钮上显示当前活跃窗口数
+            zhsWinHeartbeat();
+            if (elParBtn) {
+                const n = zhsActiveWindows();
+                const txt = '多开窗口' + (n > 0 ? '（' + n + '）' : '');
+                if (elParBtn.textContent !== txt) elParBtn.textContent = txt;
+            }
             // 页面渲染出侧栏后再初始化拖拽手柄
             if (!document.getElementById('gxnufl-sidebar-handle')) initSidebarResizer();
         }
@@ -2270,7 +2310,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.14', state);
+        log('脚本已启动 v3.16', state);
         // 多开窗口：自动开启省流量模式（不下载/不解码视频，显著降低 CPU、内存与流量）
         if (IS_ZHS && zhsIsParallelWindow() && !state.SAVE_DATA) {
             state.SAVE_DATA = true;
