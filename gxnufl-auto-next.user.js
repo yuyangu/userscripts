@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GXNUFL 刷课助手
 // @namespace    xiaobu.userscripts
-// @version      3.24.0
+// @version      3.25.0
 // @description  广西师大漓江学院(elearnmooc)：自动下一节 + 弹题自动处理 + 自定义倍速 + 自动提问 + 省流量模式；兼容智慧树网(zhihuishu.com)资料学习页（自动播放/倍速/自动切换下一个资源）
 // @author       小布
 // @match        https://gxnufl.elearnmooc.com/*
@@ -32,6 +32,13 @@
             if (!line) return;
             netLog.push(line);
             if (netLog.length > NET_MAX) netLog.shift();
+            // 网络请求同样写入共享分片（kind=n）：页面跳转/重载后仍可从原域名导出
+            try {
+                sharedPending.push({
+                    t: Date.now(), w: getWinIdSafe(), f: currentFidShort(),
+                    m: String(line).slice(0, 320), k: 'n'
+                });
+            } catch (e) {}   // 脚本初始化早期（TDZ）丢几条无妨，不影响主流程
         } catch (e) {}
     }
 
@@ -192,6 +199,18 @@
         return { lines: lines, hours: hours, ttlMs: hours * 3600 * 1000, maxBytes: maxKB * 1024 };
     }
 
+    // 事件日志(k=l)与网络日志(k=n)分别限额，避免高频网络日志把事件日志挤掉
+    function trimLogArr(arr, cfg) {
+        let ev = [], nt = [];
+        (arr || []).forEach(x => {
+            if (!x) return;
+            ((x.k || 'l') === 'n' ? nt : ev).push(x);
+        });
+        if (ev.length > cfg.lines) ev = ev.slice(ev.length - cfg.lines);
+        if (nt.length > cfg.lines) nt = nt.slice(nt.length - cfg.lines);
+        return ev.concat(nt).sort((a, b) => a.t - b.t);
+    }
+
     function getWinIdSafe() {
         try { return WIN_ID || 'main'; } catch (e) { return 'main'; }   // WIN_ID 定义较靠后，TDZ 时回退
     }
@@ -213,7 +232,7 @@
             while (logBuffer.length > cfg.lines) logBuffer.shift();
             // 同时攒入共享分片（带时间戳、窗口 id、fileId，便于跨窗口合并排序）
             sharedPending.push({
-                t: Date.now(), w: getWinIdSafe(), f: currentFidShort(), m: msg.slice(0, 220)
+                t: Date.now(), w: getWinIdSafe(), f: currentFidShort(), m: msg.slice(0, 220), k: 'l'
             });
         } catch (e) {}
         console.log('%c[GXNUFL刷课]', 'color:#2ecc71;font-weight:bold', ...a);
@@ -230,7 +249,7 @@
         const cutoff = Date.now() - cfg.ttlMs;
         arr = arr.filter(x => x && x.t > cutoff);
         while (sharedPending.length) arr.push(sharedPending.shift());
-        if (arr.length > cfg.lines) arr = arr.slice(arr.length - cfg.lines);
+        arr = trimLogArr(arr, cfg);
         // 大小上限：超出就丢弃最旧的
         let json = JSON.stringify(arr);
         let guard = 0;
@@ -242,7 +261,8 @@
     }
 
     // 合并所有标签页的分片日志，按时间排序（跨窗口共用的日志目录）
-    function collectSharedLogs() {
+    function collectSharedLogs(kind) {
+        const want = kind || 'l';
         const all = [];
         try {
             const cutoff = Date.now() - getLogCfg().ttlMs;
@@ -254,7 +274,9 @@
                 if (!Array.isArray(arr)) continue;
                 const win = k.slice(SHARD_PREFIX.length);
                 arr.forEach(x => {
-                    if (x && x.t > cutoff) all.push({ t: x.t, w: x.w || win, f: x.f || '-', m: x.m || '' });
+                    if (x && x.t > cutoff && (x.k || 'l') === want) {
+                        all.push({ t: x.t, w: x.w || win, f: x.f || '-', m: x.m || '', k: (x.k || 'l') });
+                    }
                 });
             }
         } catch (e) {}
@@ -295,7 +317,7 @@
                 if (!Array.isArray(arr)) { localStorage.removeItem(k); return; }
                 const before = arr.length;
                 arr = arr.filter(x => x && x.t > now - cfg.ttlMs);
-                if (arr.length > cfg.lines) arr = arr.slice(arr.length - cfg.lines);
+                arr = trimLogArr(arr, cfg);
                 let json = JSON.stringify(arr);
                 let guard = 0;
                 while (arr.length > 1 && json.length > cfg.maxBytes && guard++ < 6000) {
@@ -505,7 +527,10 @@
             const st = logStats();
             const c = getLogCfg();
             info.textContent = '当前：共 ' + st.count + ' 条 / ' + st.shards + ' 个标签页分片 / 约 ' + st.kb + ' KB'
-                + '　上限：' + c.lines + ' 条 · ' + c.hours + ' 小时 · ' + Math.round(c.maxBytes / 1024) + ' KB/分片';
+                + '　上限：' + c.lines + ' 条 · ' + c.hours + ' 小时 · ' + Math.round(c.maxBytes / 1024) + ' KB/分片'
+                + (/^login\./i.test(location.hostname)
+                    ? '\n⚠️ 当前在登录页：日志按域名隔离，这里的记录是独立的；回到课程页可导出完整时间线。'
+                    : '');
             const recent = st.all.slice(-40).reverse();
             preview.textContent = recent.length ? recent.map(fmtLogLine).join('\n') : '（暂无日志记录）';
         }
@@ -545,7 +570,8 @@
     function exportLog() {
         try {
             flushSharedLogs();   // 先把本页尚未落盘的日志写进去，保证导出完整
-            const shared = collectSharedLogs();
+            const shared = collectSharedLogs('l');
+            const sharedNet = collectSharedLogs('n');
             const pad = n => String(n).padStart(2, '0');
             const fmtLog = x => {
                 const d = new Date(x.t);
@@ -555,7 +581,7 @@
             const env = [
                 '=== GXNUFL 刷课助手 · 运行日志 ===',
                 '导出时间: ' + new Date().toLocaleString(),
-                '脚本版本: 3.24.0',
+                '脚本版本: 3.25.0',
                 '页面: ' + location.href,
                 '主机: ' + location.hostname,
                 'UA: ' + navigator.userAgent,
@@ -564,11 +590,14 @@
                 '多开窗口: ' + (IS_ZHS ? (zhsIsParallelWindow() ? '是' : '否') : '—'),
                 '资源统计: ' + (zhsStat ? (zhsStat.count + ' 个视频 / 总 ' + fmtDuration(zhsStat.total) + ' / 已完成 ' + zhsStat.doneCount + ' 个') : '未加载'),
                 '最近上报: ' + (window.__gxReportAt ? new Date(window.__gxReportAt).toLocaleString() : '无'),
+                '当前域名: ' + location.hostname + '　（日志按域名隔离：login./wenda./hike. 子域之间不共享；完整日志请回到课程页导出）',
                 '',
                 '--- 全部标签页日志（跨窗口合并，共 ' + shared.length + ' 条；页面重载后仍保留）---',
             ].join('\n');
             const text = env + '\n' + (shared.length ? shared.map(fmtLog).join('\n') : '（暂无日志）')
                 + '\n\n--- 本页日志 ---\n' + (logBuffer.length ? logBuffer.join('\n') : '（暂无日志）')
+                + '\n\n--- 全部标签页网络请求（跨窗口合并，共 ' + sharedNet.length + ' 条；页面重载后仍保留）---\n'
+                + (sharedNet.length ? sharedNet.map(x => x.m).join('\n') : '（暂无网络记录）')
                 + '\n\n--- 本页网络请求（最近 ' + NET_MAX + ' 条关键接口）---\n'
                 + (netLog.length ? netLog.join('\n') : '（暂无网络记录）');
             const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
@@ -3057,7 +3086,7 @@
 
     function start() {
         jq = window.jQuery || window.$;   // document-start 注入时 jQuery 可能还没加载
-        log('脚本已启动 v3.24', state);
+        log('脚本已启动 v3.25', state);
         // 多开窗口：强制关闭省流量模式（虚拟播放在智慧树可能不上报进度，会白刷）
         if (IS_ZHS && zhsIsParallelWindow() && state.SAVE_DATA) {
             state.SAVE_DATA = false;
