@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         U校园 答题助手
 // @namespace    xiaobu.userscripts
-// @version      1.2.1
+// @version      1.3.0
 // @description  U校园(unipus.cn)在线测试/作业页：一键提取全部题目并复制（可发给AI求解），粘贴答案后按随机节奏逐题填写、模仿真人答题（滚动定位+真实坐标点击）；填写延迟默认10~20秒可在面板调节
 // @author       小布
 // @match        https://*.unipus.cn/*
@@ -20,6 +20,7 @@
     const DEFAULTS = {
         FILL_DELAY_MIN: 10,  // 填写间隔下限（秒）
         FILL_DELAY_MAX: 20,  // 填写间隔上限（秒）—— 0~0 表示立即全部填入
+        AUTO_SUBMIT: false,  // 全部填完后自动点「提交」（含确认弹窗）
     };
     const STORAGE_KEY = 'unipus_helper_settings_v2';
     const settings = Object.assign({}, DEFAULTS);
@@ -167,6 +168,7 @@
 
     function stopFilling(msg) {
         if (fillTimer) { clearTimeout(fillTimer); fillTimer = null; }
+        if (submitTimer) { clearTimeout(submitTimer); submitTimer = null; }   // 取消尚未执行的自动提交
         fillQueue = [];
         updateFillButton();
         if (msg && elResult) elResult.textContent = msg;
@@ -175,10 +177,17 @@
     function stepFill() {
         fillTimer = null;
         if (!fillQueue.length) {
-            let msg = '填写完成：共 ' + fillDone + ' 题（请核对页面选择后手动提交）';
+            let msg = '填写完成：共 ' + fillDone + ' 题';
             if (fillMiss.length) msg += '；未匹配：' + fillMiss.join('、');
             stopFilling(msg);
             updateFillButton();
+            if (settings.AUTO_SUBMIT && !fillMiss.length) {
+                scheduleAutoSubmit();
+            } else if (settings.AUTO_SUBMIT && fillMiss.length) {
+                if (elResult) elResult.textContent = msg + '；存在未匹配答案，已跳过自动提交';
+            } else if (elResult) {
+                elResult.textContent = msg + '（请核对页面后手动提交）';
+            }
             return;
         }
         const job = fillQueue.shift();
@@ -191,6 +200,56 @@
         // 下一题：随机延迟
         const delay = randFillDelay();
         fillTimer = setTimeout(stepFill, delay);
+    }
+
+    // ===================== 自动提交 =====================
+    let submitTimer = null;
+    const SUBMIT_TEXTS = /^(提交|交卷|提交试卷|确认提交|提交答案)$/;
+    const CONFIRM_TEXTS = /^(确定|确认|提交|是的|好|继续|确定提交)$/;
+
+    function pickBtn(re, excludes) {
+        const list = Array.from(document.querySelectorAll('button, a[role="button"], div[role="button"], .unipus-test-btn, .ant-btn'));
+        for (const b of list) {
+            if (excludes && excludes.indexOf(b) >= 0) continue;
+            const t = (b.innerText || b.textContent || '').replace(/\s+/g, '');
+            if (!t || !re.test(t)) continue;
+            if (!isVisible(b)) continue;
+            return b;
+        }
+        return null;
+    }
+
+    function autoSubmit() {
+        submitTimer = null;
+        const btn = pickBtn(SUBMIT_TEXTS, null);
+        if (!btn) {
+            if (elResult) elResult.textContent += '；未找到「提交」按钮，请手动提交';
+            return;
+        }
+        fireClick(btn);
+        if (elResult) elResult.textContent = '已点击「提交」，正在等待确认弹窗…';
+        let tries = 0;
+        const timer = setInterval(() => {
+            tries++;
+            const ok = pickBtn(CONFIRM_TEXTS, [btn]);
+            if (ok) {
+                clearInterval(timer);
+                fireClick(ok);
+                if (elResult) elResult.textContent = '已自动提交并确认（如页面提示成功即完成）';
+                log('已自动提交并确认');
+            } else if (tries >= 10) {
+                clearInterval(timer);
+                if (elResult) elResult.textContent = '已点击「提交」（未检测到确认弹窗，请核对页面）';
+                log('已点击提交，未检测到确认弹窗');
+            }
+        }, 800);
+    }
+
+    function scheduleAutoSubmit() {
+        const wait = 3000 + Math.round(Math.random() * 4000);   // 3~7 秒
+        if (elResult) elResult.textContent = '全部填写完成；' + Math.round(wait / 1000) + ' 秒后自动提交…';
+        log('计划自动提交，等待 ' + Math.round(wait / 1000) + ' 秒');
+        submitTimer = setTimeout(autoSubmit, wait);
     }
 
     function startFilling(text) {
@@ -302,6 +361,12 @@
 #up-panel .up-num::-webkit-outer-spin-button,
 #up-panel .up-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 #up-panel .up-num:focus { border-color: rgba(79,142,247,0.65); }
+#up-panel .up-switch { position: relative; display: inline-block; width: 34px; height: 18px; flex: 0 0 auto; cursor: pointer; }
+#up-panel .up-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+#up-panel .up-track { position: absolute; inset: 0; border-radius: 999px; background: rgba(255,255,255,0.2); transition: background 0.15s; }
+#up-panel .up-track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left 0.15s; }
+#up-panel .up-switch input:checked + .up-track { background: #2ecc71; }
+#up-panel .up-switch input:checked + .up-track::after { left: 18px; }
 #up-panel .up-result { margin-top: 6px; font-size: 11px; color: #cfd3d6; min-height: 15px; word-break: break-all; }
 #up-panel .up-foot { margin-top: 6px; font-size: 10.5px; color: #8a8f98; text-align: center; }
         `;
@@ -468,6 +533,28 @@
         delayRow.appendChild(delayLabel);
         delayRow.appendChild(makeDelayInputs());
 
+        // 自动提交开关
+        const submitRow = document.createElement('div');
+        submitRow.className = 'up-row';
+        const submitLabel = document.createElement('span');
+        submitLabel.textContent = '自动提交';
+        submitLabel.title = '全部题目填完后，随机等待 3~7 秒自动点「提交」，并尝试点掉确认弹窗；存在未匹配答案时不会自动提交';
+        const submitSwitch = document.createElement('label');
+        submitSwitch.className = 'up-switch';
+        const submitCb = document.createElement('input');
+        submitCb.type = 'checkbox';
+        submitCb.checked = !!settings.AUTO_SUBMIT;
+        submitCb.addEventListener('change', () => {
+            settings.AUTO_SUBMIT = submitCb.checked;
+            saveSettings();
+        });
+        const submitTrack = document.createElement('span');
+        submitTrack.className = 'up-track';
+        submitSwitch.appendChild(submitCb);
+        submitSwitch.appendChild(submitTrack);
+        submitRow.appendChild(submitLabel);
+        submitRow.appendChild(submitSwitch);
+
         // 填入按钮
         elFillBtn = document.createElement('button');
         elFillBtn.className = 'up-btn up-green';
@@ -493,6 +580,7 @@
         elPanel.appendChild(elPreview);
         elPanel.appendChild(elAnswer);
         elPanel.appendChild(delayRow);
+        elPanel.appendChild(submitRow);
         elPanel.appendChild(elFillBtn);
         elPanel.appendChild(elResult);
         elPanel.appendChild(foot);
@@ -506,7 +594,7 @@
             setPanelOpen(false);
         }, true);
 
-        setPanelOpen(true);
+        setPanelOpen(false);   // 默认收起（只留胶囊），避免每次跳转/刷新都挡住页面
         updateFillButton();
 
         refreshStatus();
@@ -514,7 +602,7 @@
     }
 
     function start() {
-        log('U校园答题助手已启动 v1.1');
+        log('U校园答题助手已启动 v1.3.0');
         buildUI();
     }
 
