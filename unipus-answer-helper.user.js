@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         U校园 答题助手
 // @namespace    xiaobu.userscripts
-// @version      1.2.0
+// @version      1.2.1
 // @description  U校园(unipus.cn)在线测试/作业页：一键提取全部题目并复制（可发给AI求解），粘贴答案后按随机节奏逐题填写、模仿真人答题（滚动定位+真实坐标点击）；填写延迟默认10~20秒可在面板调节
 // @author       小布
 // @match        https://*.unipus.cn/*
 // @grant        none
 // @run-at       document-idle
-// @updateURL    https://raw.githubusercontent.com/yuyangu/userscripts/main/unipus-answer-helper.user.js
-// @downloadURL  https://raw.githubusercontent.com/yuyangu/userscripts/main/unipus-answer-helper.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/yuyangu/userscripts@main/unipus-answer-helper.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/yuyangu/userscripts@main/unipus-answer-helper.user.js
 // ==/UserScript==
 
 (function () {
@@ -59,23 +59,44 @@
 
     // ===================== 题目提取 =====================
     function extractQuestions() {
-        const blocks = document.querySelectorAll('.question-basic');
+        // 新版 U校园：一个 .question-basic 是"整页容器"，里面可能有 10 道题共用；
+        // 真正的"每题单元"是 .question-common-abs-reply（含自己的 .ques-title 和 .option-wrap）。
+        // 旧版/单题页面则是 .question-basic 本身就是一题，作为回退。
+        let units = Array.from(document.querySelectorAll('.question-common-abs-reply'))
+            .filter(u => u.querySelector('.ques-title') || u.querySelector('.option-wrap'));
+        if (!units.length) units = Array.from(document.querySelectorAll('.question-basic'));
+
+        const clean = t => (t || '').replace(/\s+/g, ' ').trim();
         const list = [];
-        blocks.forEach(block => {
-            const stemEl = block.querySelector('.ques-title p') || block.querySelector('.ques-title');
-            const stem = stemEl ? stemEl.innerText.replace(/\s+/g, ' ').trim() : '';
-            if (!stem) return;
+        units.forEach(u => {
+            // 题干：优先 <p>，否则整个 .ques-title；去掉开头的题号（"1." "1、"）
+            const stemEl = u.querySelector('.ques-title p') || u.querySelector('.ques-title');
+            let stem = clean(stemEl && (stemEl.innerText || stemEl.textContent));
+            stem = stem.replace(/^\d+\s*[.、)．]\s*/, '');
+            // 题干可能是图片/音频（听力题），innerText 为空 → 标注而不是丢弃
+            if (!stem) {
+                const hasMedia = u.querySelector('.ques-title img, .ques-title audio, .ques-title video');
+                stem = hasMedia ? '（题干为图片/音频）' : '';
+            }
+
             const opts = [];
-            block.querySelectorAll('.option-wrap .option').forEach(op => {
+            u.querySelectorAll('.option-wrap .option').forEach(op => {
                 const cap = op.querySelector('.caption');
                 const content = op.querySelector('.content');
+                let text = clean(content && (content.innerText || content.textContent));
+                if (!text && content && content.querySelector('img')) text = '（图片选项）';
                 opts.push({
-                    letter: (cap ? cap.innerText : '').trim().toUpperCase(),
-                    text: (content ? content.innerText : '').replace(/\s+/g, ' ').trim(),
+                    letter: (cap ? clean(cap.innerText || cap.textContent) : '').toUpperCase().replace(/[^A-Z]/g, ''),
+                    text: text,
                     el: op,
                 });
             });
-            list.push({ no: list.length + 1, stem, opts });
+
+            if (!stem && !opts.length) return;   // 空壳跳过
+            // 题号：优先页面上的 .question-number，其次顺序号
+            const numEl = u.querySelector('.question-number');
+            const noFromDom = numEl ? parseInt(clean(numEl.innerText || numEl.textContent).replace(/\D/g, ''), 10) : 0;
+            list.push({ no: noFromDom || (list.length + 1), stem: stem || '（无题干）', opts });
         });
         return list;
     }
