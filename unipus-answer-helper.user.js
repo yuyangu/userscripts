@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         U校园 答题助手
 // @namespace    xiaobu.userscripts
-// @version      1.3.0
+// @version      1.3.1
 // @description  U校园(unipus.cn)在线测试/作业页：一键提取全部题目并复制（可发给AI求解），粘贴答案后按随机节奏逐题填写、模仿真人答题（滚动定位+真实坐标点击）；填写延迟默认10~20秒可在面板调节
 // @author       小布
 // @match        https://*.unipus.cn/*
@@ -110,6 +110,31 @@
             lines.push('');
         });
         return lines.join('\n').trim();
+    }
+
+    // 识别失败时，输出页面结构诊断（方便定位新题型的选择器）
+    function diagnosePage() {
+        const out = [];
+        out.push('未识别到题目，以下是页面结构诊断（请把这段发给小布）');
+        out.push('URL: ' + location.href);
+        const sel = '[class*="question"],[class*="ques"],[class*="stem"],[class*="option"],[class*="answer"],[class*="choice"]';
+        let cands = [];
+        try { cands = Array.from(document.querySelectorAll(sel)); } catch (e) {}
+        out.push('候选元素数: ' + cands.length + '（iframe 数: ' + document.querySelectorAll('iframe').length + '）');
+        const seen = new Set();
+        let n = 0;
+        for (const el of cands) {
+            if (n >= 30) break;
+            const cls = (el.className && el.className.toString ? el.className.toString() : '').trim();
+            if (!cls || seen.has(cls)) continue;
+            const txt = (el.innerText || '').replace(/\s+/g, ' ').trim();
+            if (!txt) continue;
+            seen.add(cls);
+            out.push('  <' + el.tagName.toLowerCase() + ' class="' + cls.slice(0, 70) + '"> ' + txt.slice(0, 70));
+            n++;
+        }
+        if (!n) out.push('  （没有候选元素：可能是 iframe 内页面，或题目还没加载）');
+        return out.join('\n');
     }
 
     // ===================== 答案解析 =====================
@@ -498,7 +523,8 @@
         btnExtract.addEventListener('click', () => {
             const list = extractQuestions();
             if (!list.length) {
-                elStatus.textContent = '未检测到题目，请确认已打开测试答题页';
+                elPreview.value = diagnosePage();
+                elStatus.textContent = '未识别到题目（已生成页面结构诊断，可复制发给小布适配）';
                 return;
             }
             const text = formatQuestions(list);
@@ -602,7 +628,7 @@
     }
 
     function start() {
-        log('U校园答题助手已启动 v1.3.0');
+        log('U校园答题助手已启动 v1.3.1');
         buildUI();
     }
 
